@@ -1,0 +1,94 @@
+name: SYNTRIX macOS CI/CD & Release
+
+on:
+  push:
+    branches:
+      - main
+    tags:
+      - "v*"
+  pull_request:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag (e.g. v1.0.0). Leave blank to auto-generate v1.0.<run_number>."
+        required: false
+        default: ""
+
+permissions:
+  contents: write
+
+jobs:
+  build-and-release:
+    runs-on: macos-latest
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: "1.24"
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install Python dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r requirements.txt
+
+      - name: Run C17 engine tests
+        run: make -C engine test
+
+      - name: Run Go runtime tests
+        run: cd runtime && go test -v ./...
+
+      - name: Run Python ML tests
+        run: python -m unittest discover -s ml -p "test_*.py" -v
+
+      - name: Build and bundle SYNTRIX.app
+        run: make bundle
+
+      - name: Resolve release version
+        id: version
+        run: |
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" && -n "${{ inputs.release_tag }}" ]]; then
+            echo "tag=${{ inputs.release_tag }}" >> "$GITHUB_OUTPUT"
+          elif [[ "${{ github.ref_type }}" == "tag" ]]; then
+            echo "tag=${{ github.ref_name }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v1.0.${{ github.run_number }}" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package macOS release (.dmg, .zip, SHA256SUMS)
+        run: |
+          chmod +x scripts/package_release.sh
+          ./scripts/package_release.sh "${{ steps.version.outputs.tag }}"
+
+      - name: Upload workflow release artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: SYNTRIX-macOS-${{ steps.version.outputs.tag }}
+          path: build/release/*
+
+      - name: Publish GitHub Release
+        if: github.event_name != 'pull_request'
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          VERSION: ${{ steps.version.outputs.tag }}
+        run: |
+          if gh release view "$VERSION" --repo "${{ github.repository }}" >/dev/null 2>&1; then
+            gh release upload "$VERSION" build/release/* --repo "${{ github.repository }}" --clobber
+          else
+            gh release create "$VERSION" build/release/* \
+              --repo "${{ github.repository }}" \
+              --title "SYNTRIX $VERSION" \
+              --notes "Automated macOS release for SYNTRIX $VERSION.
+
+          - **Direct DMG:** https://github.com/${{ github.repository }}/releases/latest/download/SYNTRIX-macOS.dmg
+          - **Direct ZIP:** https://github.com/${{ github.repository }}/releases/latest/download/SYNTRIX-macOS.zip"
+          fi
