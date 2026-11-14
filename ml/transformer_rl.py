@@ -42,52 +42,68 @@ def _sinusoidal_pe(seq_len: int, d_model: int) -> np.ndarray:
     return pe
 
 
-class CausalTemporalTransformer:
-    """Lightweight 2-head causal self-attention Transformer (T=12, d_model=16) in pure NumPy."""
+def _gelu(x: np.ndarray) -> np.ndarray:
+    return 0.5 * x * (1.0 + np.tanh(np.sqrt(2.0 / np.pi) * (x + 0.044715 * (x ** 3))))
 
-    def __init__(self, seq_len: int = 12, d_in: int = 5, d_model: int = 16, n_heads: int = 2, seed: int = 42):
+
+class CausalTemporalTransformer:
+    """Deep 2-layer Pre-LN multi-head causal self-attention Transformer (T=12, d_model=24, n_heads=3) in pure NumPy."""
+
+    def __init__(self, seq_len: int = 12, d_in: int = 5, d_model: int = 24, n_heads: int = 3, n_layers: int = 2, seed: int = 42):
         rng = np.random.default_rng(seed)
         self.seq_len = seq_len
         self.d_in = d_in
         self.d_model = d_model
         self.n_heads = n_heads
+        self.n_layers = n_layers
         self.d_head = d_model // n_heads
 
-        scale = 0.15
+        scale = 0.12
         self.W_in = rng.normal(0, scale, (d_in, d_model))
-        self.W_q = rng.normal(0, scale, (d_model, d_model))
-        self.W_k = rng.normal(0, scale, (d_model, d_model))
-        self.W_v = rng.normal(0, scale, (d_model, d_model))
-        self.W_o = rng.normal(0, scale, (d_model, d_model))
-        self.W_ff1 = rng.normal(0, scale, (d_model, d_model * 2))
-        self.b_ff1 = np.zeros(d_model * 2)
-        self.W_ff2 = rng.normal(0, scale, (d_model * 2, d_model))
-        self.b_ff2 = np.zeros(d_model)
+        self.layers = []
+        for _ in range(n_layers):
+            self.layers.append({
+                "W_q": rng.normal(0, scale, (d_model, d_model)),
+                "W_k": rng.normal(0, scale, (d_model, d_model)),
+                "W_v": rng.normal(0, scale, (d_model, d_model)),
+                "W_o": rng.normal(0, scale, (d_model, d_model)),
+                "W_ff1": rng.normal(0, scale, (d_model, d_model * 2)),
+                "b_ff1": np.zeros(d_model * 2),
+                "W_ff2": rng.normal(0, scale, (d_model * 2, d_model)),
+                "b_ff2": np.zeros(d_model),
+            })
         # Predicts [next_cpu_norm, next_mem_pressure_norm]
         self.W_pred = rng.normal(0, scale, (d_model, 2))
         self.b_pred = np.zeros(2)
         self.pe = _sinusoidal_pe(seq_len, d_model)
 
     def encode(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray]:
-        """X: (B, T, d_in) -> returns latent z_last (B, d_model) and attention weights (B, H, T, T)."""
+        """X: (B, T, d_in) -> returns latent z_last (B, d_model) and last-layer attention weights (B, H, T, T)."""
         B, T, _ = X.shape
         h = X @ self.W_in + self.pe[:T][None, :, :]
-
-        Q = (h @ self.W_q).reshape(B, T, self.n_heads, self.d_head).transpose(0, 2, 1, 3)
-        K = (h @ self.W_k).reshape(B, T, self.n_heads, self.d_head).transpose(0, 2, 1, 3)
-        V = (h @ self.W_v).reshape(B, T, self.n_heads, self.d_head).transpose(0, 2, 1, 3)
-
-        scores = (Q @ K.transpose(0, 1, 3, 2)) / np.sqrt(float(self.d_head))
         mask = np.triu(np.ones((T, T), dtype=bool), k=1)
-        scores = np.where(mask[None, None, :, :], -1e9, scores)
-        attn = _softmax(scores, axis=-1)
+        last_attn = None
 
-        ctx = (attn @ V).transpose(0, 2, 1, 3).reshape(B, T, self.d_model)
-        h = _layer_norm(h + ctx @ self.W_o)
+        for layer in self.layers:
+            hn = _layer_norm(h)
+            Q = (hn @ layer["W_q"]).reshape(B, T, self.n_heads, self.d_head).transpose(0, 2, 1, 3)
+            K = (hn @ layer["W_k"]).reshape(B, T, self.n_heads, self.d_head).transpose(0, 2, 1, 3)
+            V = (hn @ layer["W_v"]).reshape(B, T, self.n_heads, self.d_head).transpose(0, 2, 1, 3)
 
-        ff = np.maximum(0.0, h @ self.W_ff1 + self.b_ff1) @ self.W_ff2 + self.b_ff2
-        h = _layer_norm(h + ff)
-        return h[:, -1, :], attn
+            scores = (Q @ K.transpose(0, 1, 3, 2)) / np.sqrt(float(self.d_head))
+            scores = np.where(mask[None, None, :, :], -1e9, scores)
+            attn = _softmax(scores, axis=-1)
+            last_attn = attn
+
+            ctx = (attn @ V).transpose(0, 2, 1, 3).reshape(B, T, self.d_model)
+            h = h + ctx @ layer["W_o"]
+
+            hn2 = _layer_norm(h)
+            ff = _gelu(hn2 @ layer["W_ff1"] + layer["b_ff1"]) @ layer["W_ff2"] + layer["b_ff2"]
+            h = h + ff
+
+        h = _layer_norm(h)
+        return h[:, -1, :], last_attn
 
     def forward(self, X: np.ndarray) -> Tuple[np.ndarray, np.ndarray, np.ndarray]:
         z, attn = self.encode(X)
@@ -146,15 +162,17 @@ class CausalTemporalTransformer:
 
 
 class ContextualQLearningAgent:
-    """Offline/Online Q-Learning policy over Transformer latent state z_t."""
+    """Double Q-Learning policy with Polyak target network over deep Transformer latent state z_t."""
 
-    def __init__(self, d_state: int = 16, n_actions: int = len(ACTIONS), gamma: float = 0.90, lr: float = 0.05):
+    def __init__(self, d_state: int = 24, n_actions: int = len(ACTIONS), gamma: float = 0.90, lr: float = 0.05):
         self.d_state = d_state
         self.n_actions = n_actions
         self.gamma = gamma
         self.lr = lr
         self.W_q = np.zeros((d_state, n_actions), dtype=np.float64)
         self.b_q = np.zeros(n_actions, dtype=np.float64)
+        self.W_target = np.zeros((d_state, n_actions), dtype=np.float64)
+        self.b_target = np.zeros(n_actions, dtype=np.float64)
         self.episodes = 0
         self.avg_reward = 0.0
 
@@ -167,7 +185,11 @@ class ContextualQLearningAgent:
             return
         for _ in range(epochs):
             q_curr = self.q_values(Z)
-            q_next = np.clip(np.max(self.q_values(Z_next), axis=1), -10.0, 10.0)
+            # Double Q-Learning: select best action with online network, evaluate with target network
+            next_online = self.q_values(Z_next)
+            best_next_act = np.argmax(next_online, axis=1)
+            next_target_all = Z_next @ self.W_target + self.b_target
+            q_next = np.clip(next_target_all[np.arange(n), best_next_act], -10.0, 10.0)
             targets = rewards + self.gamma * q_next
             td_errs = np.clip(targets - q_curr[np.arange(n), actions], -2.0, 2.0)
             for a in range(self.n_actions):
@@ -178,8 +200,39 @@ class ContextualQLearningAgent:
                 grad_b = float(np.sum(td_errs[mask])) / float(n)
                 self.W_q[:, a] = np.clip(self.W_q[:, a] + self.lr * grad_w, -5.0, 5.0)
                 self.b_q[a] = float(np.clip(self.b_q[a] + self.lr * grad_b, -5.0, 5.0))
+            # Soft Polyak target update
+            tau = 0.2
+            self.W_target = (1.0 - tau) * self.W_target + tau * self.W_q
+            self.b_target = (1.0 - tau) * self.b_target + tau * self.b_q
         self.episodes += n
         self.avg_reward = round(float(np.mean(rewards)), 3)
+
+    def save_checkpoint(self, ckpt_path: str) -> None:
+        try:
+            np.savez(
+                ckpt_path,
+                W_q=self.W_q,
+                b_q=self.b_q,
+                W_target=self.W_target,
+                b_target=self.b_target,
+                episodes=np.array([self.episodes], dtype=np.int64),
+            )
+        except OSError:
+            pass
+
+    def load_checkpoint(self, ckpt_path: str) -> None:
+        if not ckpt_path or not os.path.exists(ckpt_path):
+            return
+        try:
+            data = np.load(ckpt_path)
+            if data["W_q"].shape == self.W_q.shape:
+                self.W_q = data["W_q"]
+                self.b_q = data["b_q"]
+                self.W_target = data["W_target"]
+                self.b_target = data["b_target"]
+                self.episodes = int(data["episodes"][0])
+        except Exception:
+            pass
 
 
 def load_sqlite_experience(db_path: str, limit: int = 5000) -> Tuple[np.ndarray, List[Dict[str, Any]]]:
@@ -276,8 +329,10 @@ def infer_and_update(db_path: str, live_payload: Dict[str, Any]) -> Dict[str, An
         feats = np.vstack([pad, feats])
 
     seq_len = 12
-    transformer = CausalTemporalTransformer(seq_len=seq_len)
-    rl = ContextualQLearningAgent(d_state=16)
+    transformer = CausalTemporalTransformer(seq_len=seq_len, d_model=24, n_heads=3, n_layers=2)
+    rl = ContextualQLearningAgent(d_state=24)
+    ckpt_path = f"{db_path}.rl_ckpt.npz" if db_path else ""
+    rl.load_checkpoint(ckpt_path)
 
     X_seqs, y_next, act_list, rew_list = [], [], [], []
     for i in range(seq_len, len(feats) - 1):
@@ -313,6 +368,8 @@ def infer_and_update(db_path: str, live_payload: Dict[str, Any]) -> Dict[str, An
     preds, z_live, _ = transformer.predict_next(live_window)
     q_vals = rl.q_values(z_live)[0]
     best_idx = int(np.argmax(q_vals))
+    if ckpt_path:
+        rl.save_checkpoint(ckpt_path)
 
     return {
         "transformer_pred_cpu_pct": round(float(preds[0, 0] * 100.0), 1),

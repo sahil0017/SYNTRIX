@@ -15,6 +15,9 @@ struct SyntrixApp: App {
                     NSApp.appearance = NSAppearance(named: .darkAqua)
                     NSApp.activate(ignoringOtherApps: true)
                     appDelegate.ensureDaemonRunning()
+                    client.onNeedDaemon = { [weak appDelegate] in
+                        appDelegate?.ensureDaemonRunning()
+                    }
                     NotificationService.shared.onCleanMemory = { recID in
                         client.approveRecommendation(recID)
                     }
@@ -38,15 +41,30 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         if FileManager.default.fileExists(atPath: sockPath) && canConnect(sockPath: sockPath) {
             return
         }
+        if let existing = daemonProcess, existing.isRunning {
+            return
+        }
 
         guard let daemonURL = findDaemonBinary() else {
             return
         }
 
+        try? FileManager.default.removeItem(atPath: sockPath)
+
         let proc = Process()
         proc.executableURL = daemonURL
-        proc.standardOutput = FileHandle.nullDevice
-        proc.standardError = FileHandle.nullDevice
+        let logURL = URL(fileURLWithPath: "/tmp/syntrixd.log")
+        if !FileManager.default.fileExists(atPath: logURL.path) {
+            FileManager.default.createFile(atPath: logURL.path, contents: nil)
+        }
+        if let logHandle = try? FileHandle(forWritingTo: logURL) {
+            logHandle.seekToEndOfFile()
+            proc.standardOutput = logHandle
+            proc.standardError = logHandle
+        } else {
+            proc.standardOutput = FileHandle.nullDevice
+            proc.standardError = FileHandle.nullDevice
+        }
         do {
             try proc.run()
             daemonProcess = proc

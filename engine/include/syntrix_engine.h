@@ -50,6 +50,8 @@ typedef struct {
     double used_pct;
     double pressure_pct;
     syntrix_pressure_level_t pressure_level;
+    double pageins_per_sec;
+    double pageouts_per_sec;
 } syntrix_memory_metrics_t;
 
 typedef struct {
@@ -57,6 +59,10 @@ typedef struct {
     uint64_t free_bytes;
     uint64_t available_bytes;
     double used_pct;
+    double read_bytes_per_sec;
+    double write_bytes_per_sec;
+    double read_iops;
+    double write_iops;
 } syntrix_disk_metrics_t;
 
 typedef struct {
@@ -81,6 +87,14 @@ typedef struct {
 } syntrix_thermal_metrics_t;
 
 typedef struct {
+    bool available;
+    double device_util_pct;
+    double renderer_util_pct;
+    double tiler_util_pct;
+    uint64_t in_use_memory_bytes;
+} syntrix_gpu_metrics_t;
+
+typedef struct {
     uint64_t error_count;
     uint64_t last_duration_us;
     double confidence; /* 0.0 = unavailable, 0.5 = partial/inferred, 1.0 = direct */
@@ -96,6 +110,11 @@ typedef struct {
     uint64_t memory_bytes;
     uint64_t virtual_bytes;
     uint32_t threads;
+    uint64_t phys_footprint_bytes;
+    double disk_read_bps;
+    double disk_write_bps;
+    double pageins_per_sec;
+    double wakeups_per_sec;
 } syntrix_process_info_t;
 
 typedef struct {
@@ -108,6 +127,7 @@ typedef struct {
     syntrix_network_metrics_t network;
     syntrix_power_metrics_t power;
     syntrix_thermal_metrics_t thermal;
+    syntrix_gpu_metrics_t gpu;
     syntrix_collector_health_t cpu_health;
     syntrix_collector_health_t mem_health;
     syntrix_collector_health_t proc_health;

@@ -177,6 +177,25 @@ func BuildActionSpec(rec store.Recommendation) ActionSpec {
 			DryRunSummary:  dry,
 		}
 
+	case "full_optimize":
+		previews := PreviewStaleUserCaches(3*24*time.Hour, 8)
+		var totalMB float64
+		for _, p := range previews {
+			totalMB += p.SizeMB
+		}
+		return ActionSpec{
+			ID:             rec.ID,
+			Kind:           rec.Kind,
+			Preconditions:  []string{"Non-protected processes only", "Stale caches >3d, logs >7d, DerivedData >14d"},
+			ExpectedEffect: fmt.Sprintf("Reclaim ~%.1f MB stale disk/caches, free Go heap, and renice background CPU hogs.", totalMB),
+			Risk:           ActionRiskIrreversible,
+			Reversible:     false,
+			Timeout:        10 * time.Second,
+			TargetName:     "System",
+			DryRunSummary:  fmt.Sprintf("DRY-RUN: Would optimize RAM, clean ~%.1f MB stale caches/logs/DerivedData, and renice high-CPU background processes.", totalMB),
+			CachePreviews:  previews,
+		}
+
 	case "memory_pressure", "memory_growth":
 		return ActionSpec{
 			ID:             rec.ID,
@@ -206,7 +225,18 @@ func BuildActionSpec(rec store.Recommendation) ActionSpec {
 }
 
 func (c *OptimizationController) Execute(ctx context.Context, rec store.Recommendation, dryRun bool, before engine.Snapshot, afterFn func() (engine.Snapshot, bool)) ActionResult {
-	spec := BuildActionSpec(rec)
+	var spec ActionSpec
+	if !dryRun && rec.Kind == "full_optimize" {
+		// Fast path for live Full Optimize: avoid walking caches twice (preview + clean).
+		spec = ActionSpec{
+			ID:         rec.ID,
+			Kind:       rec.Kind,
+			Timeout:    12 * time.Second,
+			TargetName: "System",
+		}
+	} else {
+		spec = BuildActionSpec(rec)
+	}
 	if dryRun {
 		return ActionResult{
 			Spec:               spec,
@@ -265,16 +295,42 @@ func (c *OptimizationController) Execute(ctx context.Context, rec store.Recommen
 		if runCtx.Err() != nil {
 			return ActionResult{Spec: spec, Cancelled: true, Summary: "Cancelled before cache cleanup."}
 		}
-		reclaimed := CleanStaleUserCaches(3 * 24 * time.Hour)
-		if home, err := os.UserHomeDir(); err == nil {
-			reclaimed += CleanStaleCachesInDir(filepath.Join(home, "Library", "Logs"), 7*24*time.Hour)
+		reclaimed := CleanAllSafeTargets()
+		summary = fmt.Sprintf("Cleaned stale (>3d caches, >7d logs, >14d DerivedData) non-Apple files: %.1f MB reclaimed.", float64(reclaimed)/(1024*1024))
+
+	case "full_optimize":
+		if runCtx.Err() != nil {
+			return ActionResult{Spec: spec, Cancelled: true, Summary: "Cancelled before full optimization."}
 		}
-		summary = fmt.Sprintf("Deleted stale (>3d caches, >7d logs) non-Apple user files: %.1f MB reclaimed.", float64(reclaimed)/(1024*1024))
+		runtime.GC()
+		debug.FreeOSMemory()
+		reclaimed := CleanAllSafeTargets()
+		reniced := 0
+		for _, p := range before.TopProcesses {
+			if reniced >= 5 {
+				break
+			}
+			if p.CPUPct >= 25.0 && p.PID > 100 && !IsProtectedProcess(p.PID, p.Name) {
+				if syscall.Setpriority(syscall.PRIO_PROCESS, int(p.PID), 10) == nil {
+					reniced++
+				}
+			}
+		}
+		summary = fmt.Sprintf("Full Optimize: freed daemon RAM, reclaimed %.1f MB stale caches/logs/DerivedData, reniced %d background CPU hog(s).",
+			float64(reclaimed)/(1024*1024), reniced)
 
 	default:
 		runtime.GC()
 		debug.FreeOSMemory()
-		summary = "Released syntrixd Go heap pages (note: does not reclaim other applications' macOS memory)."
+		var reclaimed int64
+		if before.Memory.PressurePct >= 75.0 || before.Memory.PageinsPerSec >= 40.0 {
+			reclaimed = CleanStaleUserCaches(7 * 24 * time.Hour)
+		}
+		if reclaimed > 0 {
+			summary = fmt.Sprintf("Released daemon Go heap & reclaimed %.1f MB stale (>7d) caches to ease swap/memory pressure.", float64(reclaimed)/(1024*1024))
+		} else {
+			summary = "Released syntrixd Go heap pages (note: macOS protects other apps' private memory unless terminated)."
+		}
 	}
 
 	after := before
@@ -383,6 +439,31 @@ func CleanStaleUserCaches(maxAge time.Duration) int64 {
 	return CleanStaleCachesInDir(filepath.Join(home, "Library", "Caches"), maxAge)
 }
 
+func CleanAllSafeTargets() int64 {
+	var reclaimed int64
+	reclaimed += CleanStaleUserCaches(3 * 24 * time.Hour)
+	if home, err := os.UserHomeDir(); err == nil {
+		reclaimed += CleanStaleCachesInDir(filepath.Join(home, "Library", "Logs"), 7*24*time.Hour)
+		reclaimed += CleanStaleCachesInDir(filepath.Join(home, "Library", "Developer", "Xcode", "DerivedData"), 7*24*time.Hour)
+	}
+	return reclaimed
+}
+
+func removeStaleFile(path string) error {
+	if err := os.Remove(path); err == nil {
+		return nil
+	}
+	// Read-only caches (e.g., dotslash, bazel, content-addressed stores) mark files/dirs 0555.
+	parent := filepath.Dir(path)
+	if info, err := os.Stat(parent); err == nil && info.Mode().Perm()&0o200 == 0 {
+		_ = os.Chmod(parent, info.Mode().Perm()|0o700)
+	}
+	if info, err := os.Lstat(path); err == nil && info.Mode()&os.ModeSymlink == 0 && info.Mode().Perm()&0o200 == 0 {
+		_ = os.Chmod(path, info.Mode().Perm()|0o600)
+	}
+	return os.Remove(path)
+}
+
 func CleanStaleCachesInDir(cacheRoot string, maxAge time.Duration) int64 {
 	entries, err := os.ReadDir(cacheRoot)
 	if err != nil {
@@ -400,8 +481,13 @@ func CleanStaleCachesInDir(cacheRoot string, maxAge time.Duration) int64 {
 			continue
 		}
 		subDir := filepath.Join(cacheRoot, name)
+		var dirs []string
 		_ = filepath.WalkDir(subDir, func(path string, d os.DirEntry, walkErr error) error {
-			if walkErr != nil || d.IsDir() {
+			if walkErr != nil {
+				return nil
+			}
+			if d.IsDir() {
+				dirs = append(dirs, path)
 				return nil
 			}
 			info, err := d.Info()
@@ -410,12 +496,28 @@ func CleanStaleCachesInDir(cacheRoot string, maxAge time.Duration) int64 {
 			}
 			if info.ModTime().Before(cutoff) {
 				sz := info.Size()
-				if os.Remove(path) == nil {
+				if removeStaleFile(path) == nil {
 					reclaimed += sz
 				}
 			}
 			return nil
 		})
+		// Prune empty directories bottom-up so read-only empty cache trees are also cleaned.
+		for i := len(dirs) - 1; i >= 0; i-- {
+			dPath := dirs[i]
+			if subEntries, err := os.ReadDir(dPath); err == nil && len(subEntries) == 0 {
+				if os.Remove(dPath) != nil {
+					parent := filepath.Dir(dPath)
+					if pInfo, pErr := os.Stat(parent); pErr == nil && pInfo.Mode().Perm()&0o200 == 0 {
+						_ = os.Chmod(parent, pInfo.Mode().Perm()|0o700)
+					}
+					if dInfo, dErr := os.Stat(dPath); dErr == nil && dInfo.Mode().Perm()&0o200 == 0 {
+						_ = os.Chmod(dPath, dInfo.Mode().Perm()|0o700)
+					}
+					_ = os.Remove(dPath)
+				}
+			}
+		}
 	}
 	return reclaimed
 }

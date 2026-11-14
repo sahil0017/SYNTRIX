@@ -13,6 +13,8 @@ import json
 import os
 import sqlite3
 import sys
+import time
+import warnings
 from typing import Any, Dict, List, Tuple
 
 import numpy as np
@@ -23,14 +25,15 @@ from sklearn.ensemble import (
     IsolationForest,
     RandomForestRegressor,
 )
+from sklearn.exceptions import ConvergenceWarning
 from sklearn.linear_model import HuberRegressor, Ridge
 from sklearn.neighbors import LocalOutlierFactor
 from sklearn.neural_network import MLPRegressor
 from sklearn.pipeline import make_pipeline
 from sklearn.preprocessing import StandardScaler
 
-MODEL_VERSION = "2.1.0"
-FEATURE_SCHEMA_VERSION = "v2"
+MODEL_VERSION = "2.2.0"
+FEATURE_SCHEMA_VERSION = "v3"
 
 
 def load_history(db_path: str, limit: int = 500) -> List[Tuple[int, float, float, float, str]]:
@@ -125,17 +128,27 @@ def forecast_memory(timestamps_ms: np.ndarray, pressures: np.ndarray, current_pc
                     "GradientBoosting": GradientBoostingRegressor(n_estimators=25, max_depth=2, random_state=42),
                     "NeuralMLP": make_pipeline(
                         StandardScaler(),
-                        MLPRegressor(hidden_layer_sizes=(16, 8), max_iter=600, tol=1e-2, random_state=42),
+                        MLPRegressor(
+                            hidden_layer_sizes=(16, 8),
+                            max_iter=800,
+                            early_stopping=len(X_tr) >= 12,
+                            n_iter_no_change=10,
+                            learning_rate_init=0.01,
+                            tol=1e-2,
+                            random_state=42,
+                        ),
                     ),
                 }
                 best_mae = float("inf")
-                for name, mdl in candidates.items():
-                    mdl.fit(X_tr, y_tr)
-                    preds = mdl.predict(X_va)
-                    mae = float(np.mean(np.abs(y_va - preds)))
-                    if mae < best_mae:
-                        best_mae = mae
-                        selected_model = name
+                with warnings.catch_warnings():
+                    warnings.simplefilter("ignore", ConvergenceWarning)
+                    for name, mdl in candidates.items():
+                        mdl.fit(X_tr, y_tr)
+                        preds = mdl.predict(X_va)
+                        mae = float(np.mean(np.abs(y_va - preds)))
+                        if mae < best_mae:
+                            best_mae = mae
+                            selected_model = name
                 val_mae = best_mae
                 uncertainty = max(2.0, best_mae * 1.5)
 
@@ -272,6 +285,16 @@ def detect_abnormal_apps(
                 consensus = "IsolationForest+LOF" if (iso_out and lof_out) else ("IsolationForest" if iso_out else "LocalOutlierFactor")
                 bonus = 0.08 if (iso_out and lof_out) else 0.0
                 norm_score = float(np.clip(0.5 - iso_scores[idx] + bonus, 0.5, 0.99))
+                pageins = float(p.get("pageins", 0.0))
+                io_mbs = (float(p.get("disk_read_bps", 0.0)) + float(p.get("disk_write_bps", 0.0))) / (1024.0 * 1024.0)
+                wakeups = float(p.get("wakeups_per_sec", 0.0))
+                cause = "cpu_spin" if cpu >= 40.0 else "memory_spike"
+                if pageins >= 20.0:
+                    cause = "swap_thrash"
+                elif io_mbs >= 25.0:
+                    cause = "io_saturation"
+                elif wakeups >= 150.0 and cpu < 25.0:
+                    cause = "wakeup_drain"
                 abnormal.append(
                     {
                         "name": p.get("name", "unknown"),
@@ -279,7 +302,8 @@ def detect_abnormal_apps(
                         "cpu_pct": round(cpu, 1),
                         "mem_mb": round(mem_mb, 1),
                         "anomaly_score": round(norm_score, 2),
-                        "reason": f"{consensus} outlier (CPU {cpu:.1f}%, RSS {mem_mb:.0f} MB)",
+                        "cause": cause,
+                        "reason": f"{consensus} [{cause}] (CPU {cpu:.1f}%, RSS {mem_mb:.0f} MB)",
                     }
                 )
     else:
@@ -338,9 +362,10 @@ def classify_workload_regime(
     }
 
 
-def rank_candidate_actions(live_cpu: float, live_mem: float, live_disk: float) -> List[Dict[str, Any]]:
+def rank_candidate_actions(live_cpu: float, live_mem: float, live_disk: float, pageins_s: float = 0.0) -> List[Dict[str, Any]]:
+    mem_signal = min(0.98, max(0.15, live_mem / 100.0 + min(0.25, pageins_s / 400.0)))
     candidates = [
-        ("trim_daemon_heap", round(min(0.95, max(0.15, live_mem / 100.0)), 2)),
+        ("trim_daemon_heap", round(mem_signal, 2)),
         ("nice_background_cpu", round(min(0.95, max(0.10, live_cpu / 100.0)), 2)),
         ("preview_stale_caches", round(min(0.95, max(0.10, live_disk / 100.0)), 2)),
         ("monitor_only", round(max(0.20, 1.0 - max(live_cpu, live_mem) / 100.0), 2)),
@@ -350,11 +375,13 @@ def rank_candidate_actions(live_cpu: float, live_mem: float, live_disk: float) -
 
 
 def predict(db_path: str, live_payload: Dict[str, Any]) -> Dict[str, Any]:
+    t0 = time.perf_counter()
     rows = load_history(db_path)
 
     live_cpu_pct = float(live_payload.get("cpu_pct", 0.0))
     live_mem_pct = float(live_payload.get("mem_pressure_pct", 0.0))
     live_disk_pct = float(live_payload.get("disk_used_pct", 0.0))
+    live_pageins_s = float(live_payload.get("pageins_per_sec", 0.0))
     live_ts_ms = int(live_payload.get("timestamp_ms", 0))
     live_procs = live_payload.get("top_processes") or []
 
@@ -378,31 +405,49 @@ def predict(db_path: str, live_payload: Dict[str, Any]) -> Dict[str, Any]:
     sto_fc = forecast_storage(ts_arr, disk_arr, cur_disk)
     abnormal = detect_abnormal_apps(rows, live_procs)
     regime_info = classify_workload_regime(rows, live_cpu_pct, cur_mem, cur_disk)
-    ranked_actions = rank_candidate_actions(live_cpu_pct, cur_mem, cur_disk)
+    ranked_actions = rank_candidate_actions(live_cpu_pct, cur_mem, cur_disk, live_pageins_s)
 
     transformer_rl_out = None
+    super_intel_out = None
+    neural_subsystems_out = None
+    app_advisor_out = None
     try:
         script_dir = os.path.dirname(os.path.abspath(__file__))
         if script_dir not in sys.path:
             sys.path.insert(0, script_dir)
         from transformer_rl import infer_and_update
+        from super_intelligence import run_super_intelligence
+        from neural_subsystems import run_neural_subsystems
+        from app_advisor import explain_telemetry_and_models
 
         transformer_rl_out = infer_and_update(db_path, live_payload)
+        super_intel_out = run_super_intelligence(rows, live_payload)
+        neural_subsystems_out = run_neural_subsystems(rows, live_payload)
+        app_advisor_out = explain_telemetry_and_models(
+            live_payload, mem_fc, super_intel_out, neural_subsystems_out, len(ts_list)
+        )
     except Exception:
         transformer_rl_out = None
+        super_intel_out = None
+        neural_subsystems_out = None
+        app_advisor_out = None
 
     summary_parts = [
         f"Mem 15m={mem_fc['predicted_15m_pct']:.0f}%±{mem_fc['uncertainty_pct']:.0f}% ({mem_fc['risk']})",
         f"Disk={sto_fc['current_pct']:.0f}% ({sto_fc['risk']})",
         f"Regime={regime_info['regime']}",
     ]
+    if super_intel_out:
+        hi = super_intel_out["health_index"]["health_score"]
+        bs = super_intel_out["bottleneck"]["dominant_state"]
+        summary_parts.append(f"Health={hi:.0f}/100 ({bs})")
     if abnormal:
         summary_parts.append(f"{len(abnormal)} abnormal app(s): {abnormal[0]['name']}")
     else:
         summary_parts.append("No abnormal apps")
 
     return {
-        "model_backend": f"python-sklearn ({mem_fc['selected_model']} + IF/LOF + KMeans)",
+        "model_backend": f"python-sklearn ({mem_fc['selected_model']} + IF/LOF + KMeans + PCA + UCB)",
         "model_version": MODEL_VERSION,
         "feature_schema_version": FEATURE_SCHEMA_VERSION,
         "sample_count": len(ts_list),
@@ -411,7 +456,11 @@ def predict(db_path: str, live_payload: Dict[str, Any]) -> Dict[str, Any]:
         "workload_regime": regime_info,
         "recommended_actions": ranked_actions,
         "transformer_rl": transformer_rl_out,
+        "super_intelligence": super_intel_out,
+        "neural_subsystems": neural_subsystems_out,
+        "app_advisor": app_advisor_out,
         "abnormal_apps": abnormal,
+        "inference_ms": round((time.perf_counter() - t0) * 1000.0, 2),
         "summary": " · ".join(summary_parts),
     }
 

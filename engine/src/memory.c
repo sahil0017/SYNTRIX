@@ -5,6 +5,11 @@
 #include <string.h>
 #include <sys/sysctl.h>
 
+static uint64_t g_prev_pageins = 0;
+static uint64_t g_prev_pageouts = 0;
+static uint64_t g_prev_mem_mono_ns = 0;
+static bool g_mem_has_prev = false;
+
 syntrix_status_t syntrix_memory_collect(syntrix_memory_metrics_t *out) {
     if (!out) {
         return SYNTRIX_ERR_INVALID_ARG;
@@ -71,6 +76,23 @@ syntrix_status_t syntrix_memory_collect(syntrix_memory_metrics_t *out) {
     } else {
         out->pressure_level = SYNTRIX_PRESSURE_NORMAL;
     }
+
+    uint64_t now_mono = syntrix_monotonic_ns();
+    if (g_mem_has_prev && now_mono > g_prev_mem_mono_ns) {
+        double dt_sec = (double)(now_mono - g_prev_mem_mono_ns) / 1000000000.0;
+        if (dt_sec > 0.0) {
+            if (vm_stat.pageins >= g_prev_pageins) {
+                out->pageins_per_sec = (double)(vm_stat.pageins - g_prev_pageins) / dt_sec;
+            }
+            if (vm_stat.pageouts >= g_prev_pageouts) {
+                out->pageouts_per_sec = (double)(vm_stat.pageouts - g_prev_pageouts) / dt_sec;
+            }
+        }
+    }
+    g_prev_pageins = vm_stat.pageins;
+    g_prev_pageouts = vm_stat.pageouts;
+    g_prev_mem_mono_ns = now_mono;
+    g_mem_has_prev = true;
 
     return SYNTRIX_OK;
 }

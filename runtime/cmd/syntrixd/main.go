@@ -80,6 +80,7 @@ func main() {
 	}
 
 	pyPred := intelligence.NewPythonPredictor(*dbPath)
+	companion.SetPythonPredictor(pyPred)
 	storageMon := intelligence.NewStorageMonitor()
 	srv := ipc.NewServer(*sockPath, companion, st)
 	srv.SetWorkflowEngine(workflow.NewEngine(bus, reg, st))
@@ -98,9 +99,10 @@ func main() {
 	_ = st.AppendAuditLog("system", "daemon_start", *sockPath, "ok", "SYNTRIX runtime online")
 	log.Printf("syntrixd online (sock=%s, db=%s, mode=%s)", *sockPath, *dbPath, companion.Mode())
 
-	// Warm-up sample so delta-based CPU/network metrics are ready immediately.
+	// Warm-up sample so delta-based CPU/network metrics and Python ML are ready immediately.
 	if snap, err := collector.Collect(12); err == nil {
 		companion.UpdateSnapshot(snap)
+		_ = pyPred.EvaluateCached(snap)
 	}
 
 	sigCh := make(chan os.Signal, 1)

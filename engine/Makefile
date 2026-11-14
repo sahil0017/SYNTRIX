@@ -6,7 +6,7 @@ BUILD_DIR = build
 LIB = $(BUILD_DIR)/libsyntrix_engine.a
 TEST_BIN = $(BUILD_DIR)/test_engine
 
-SRCS = src/cpu.c src/memory.c src/process.c src/storage.c src/network.c src/power.c src/thermal.c src/system.c
+SRCS = src/cpu.c src/memory.c src/process.c src/storage.c src/network.c src/power.c src/thermal.c src/gpu.c src/system.c
 OBJS = $(patsubst src/%.c,$(BUILD_DIR)/%.o,$(SRCS))
 
 .PHONY: all clean test test-asan

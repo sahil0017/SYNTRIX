@@ -250,20 +250,34 @@ func (g *GuardianAgent) EvaluateWithForecast(
 	rlActionName := ""
 	predMemForVerify := snap.Memory.PressurePct
 	if candidate == nil && forecast != nil {
-		memHeadingHigh := forecast.MemoryForecast.Predicted5mPct >= 75.0 ||
+		swapThrashing := snap.Memory.PageinsPerSec >= 100.0 || snap.Memory.PageoutsPerSec >= 50.0
+		memHeadingHigh := swapThrashing ||
+			forecast.MemoryForecast.Predicted5mPct >= 75.0 ||
 			forecast.MemoryForecast.Predicted15mPct >= 80.0 ||
 			(forecast.TransformerRL != nil && forecast.TransformerRL.PredMemPct >= 75.0)
 		cpuHeadingHigh := forecast.TransformerRL != nil && forecast.TransformerRL.PredCPUPct >= 80.0
 		if forecast.TransformerRL != nil {
 			predMemForVerify = forecast.TransformerRL.PredMemPct
 		}
+		siRisk := false
+		siCPUSpin := false
+		if forecast.SuperIntelligence != nil {
+			si := forecast.SuperIntelligence
+			if si.HealthIndex.HealthScore < 65.0 || si.HangRiskScore >= 75.0 ||
+				(si.Bottleneck.DominantState != "Nominal" && si.Bottleneck.Confidence >= 0.65) {
+				siRisk = true
+			}
+			if si.Bottleneck.DominantState == "CPU-Spin Hang" && si.Bottleneck.Confidence >= 0.60 {
+				siCPUSpin = true
+			}
+		}
 
-		if memHeadingHigh || cpuHeadingHigh {
+		if memHeadingHigh || cpuHeadingHigh || siRisk {
 			// Pick best reversible RL action using offline Q-policy + online reward adjustment
 			chosen := "trim_daemon_heap"
 			if forecast.TransformerRL != nil && forecast.TransformerRL.OptimalAction != "" && forecast.TransformerRL.OptimalAction != "monitor_only" {
 				chosen = forecast.TransformerRL.OptimalAction
-			} else if cpuHeadingHigh && !memHeadingHigh {
+			} else if (cpuHeadingHigh || siCPUSpin) && !memHeadingHigh {
 				chosen = "nice_background_cpu"
 			}
 			// If online RL learned negative score for nice_background_cpu vs trim_daemon_heap, prefer higher score

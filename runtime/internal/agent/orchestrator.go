@@ -131,6 +131,56 @@ func (o *Orchestrator) ActivateKillSwitch() int {
 	return n
 }
 
+func (o *Orchestrator) RunFullOptimize() string {
+	// Explicit user OPTIMIZE ALL clears any prior kill-switch pause.
+	o.optCtrl.ResetKillSwitch()
+
+	snap, ok := o.collectFreshSnapshot()
+	if !ok {
+		snap, _ = o.companion.LatestSnapshot()
+	} else {
+		o.companion.UpdateSnapshot(snap)
+	}
+	rec := store.Recommendation{
+		ID:          fmt.Sprintf("full-opt-%d", time.Now().UnixMilli()),
+		CreatedAtMs: time.Now().UnixMilli(),
+		Kind:        "full_optimize",
+		Severity:    "medium",
+		Title:       "Full System Optimize (RAM, Cache, CPU, Disk)",
+		Detail:      "Coordinated optimization across daemon heap, stale caches/logs/DerivedData, and background CPU hogs.",
+		TargetName:  "System",
+		Status:      "approved",
+	}
+	res := o.optCtrl.Execute(context.Background(), rec, false, snap, o.collectFreshSnapshot)
+
+	// Resolve pending safe recommendations in the queue so OPTIMIZATIONS reflects the run.
+	resolvedCount := 0
+	if o.store != nil {
+		if pending, err := o.store.ListRecommendations(20); err == nil {
+			for _, r := range pending {
+				if r.Status != "" && r.Status != "pending" {
+					continue
+				}
+				if r.Kind == "inactive_app_memory" {
+					continue // Never auto-terminate user apps without explicit per-item approval.
+				}
+				if err := o.store.UpdateRecommendationStatus(r.ID, "approved", "Resolved by Full Optimize"); err == nil {
+					resolvedCount++
+				}
+			}
+		}
+	}
+
+	report := res.VerificationReport
+	if resolvedCount > 0 {
+		report = fmt.Sprintf("%s | Resolved %d pending recommendation(s)", report, resolvedCount)
+	}
+	if o.store != nil {
+		_ = o.store.AppendAuditLog("user", "full_optimize", "System", "ok", report)
+	}
+	return report
+}
+
 func (o *Orchestrator) ApproveAndVerify(recID string) (string, error) {
 	corrID := fmt.Sprintf("exec-%d", time.Now().UnixMilli())
 	mode := string(o.companion.Mode())

@@ -120,6 +120,8 @@ syntrix_status_t syntrix_collect_snapshot(syntrix_snapshot_t *out, uint32_t max_
     syntrix_status_t thm_st = syntrix_thermal_collect(&out->thermal);
     record_health(&out->thermal_health, thm_st, t0, &g_err_counts.thermal_err, 0.85);
 
+    (void)syntrix_gpu_collect(&out->gpu);
+
     t0 = syntrix_monotonic_ns();
     syntrix_status_t proc_st = syntrix_process_collect(
         out->top_processes,

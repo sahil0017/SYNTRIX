@@ -171,8 +171,34 @@ struct OverviewScreen: View {
                     let pendingRecs = client.recommendations.filter { $0.status == "pending" }
                     let lastApproved = client.recommendations.first { $0.status == "approved" }
                     HUDPanel(title: "OPTIMIZATIONS", trailing: "\(pendingRecs.count) PENDING") {
-                        HStack {
+                        HStack(spacing: 8) {
                             Spacer()
+                            Button {
+                                client.runFullOptimize()
+                            } label: {
+                                HStack(spacing: 4) {
+                                    if client.isOptimizing {
+                                        ProgressView()
+                                            .scaleEffect(0.55)
+                                            .frame(width: 10, height: 10)
+                                    } else {
+                                        Image(systemName: "bolt.shield.fill")
+                                            .font(.system(size: 9))
+                                            .imageScale(.small)
+                                    }
+                                    Text(client.isOptimizing ? "OPTIMIZING..." : "OPTIMIZE ALL")
+                                        .font(.system(size: 9, weight: .bold, design: .monospaced))
+                                }
+                                .foregroundStyle(HUDColors.green)
+                                .padding(.horizontal, 7)
+                                .padding(.vertical, 3)
+                                .background(HUDColors.green.opacity(0.15))
+                                .cornerRadius(3)
+                            }
+                            .buttonStyle(.plain)
+                            .disabled(client.isOptimizing)
+                            .help("Full System Optimize: free daemon RAM, clean stale caches/logs/DerivedData, renice CPU hogs, and resolve pending safe actions")
+
                             Button {
                                 client.activateKillSwitch()
                             } label: {
@@ -188,6 +214,33 @@ struct OverviewScreen: View {
                             .help("Kill switch: immediately abort all running/pending optimizations")
                         }
                         .padding(.top, -4)
+                        if let summary = client.lastOptimizeSummary, !summary.isEmpty {
+                            HStack(spacing: 6) {
+                                Image(systemName: "checkmark.circle.fill")
+                                    .font(.system(size: 10))
+                                    .foregroundStyle(HUDColors.green)
+                                Text(summary)
+                                    .font(.system(size: 10, design: .monospaced))
+                                    .foregroundStyle(HUDColors.textPrimary)
+                                    .lineLimit(2)
+                                Spacer()
+                                Button {
+                                    client.lastOptimizeSummary = nil
+                                } label: {
+                                    Image(systemName: "xmark")
+                                        .font(.system(size: 9))
+                                        .foregroundStyle(HUDColors.textMuted)
+                                }
+                                .buttonStyle(.plain)
+                            }
+                            .padding(6)
+                            .background(HUDColors.green.opacity(0.10))
+                            .overlay(
+                                RoundedRectangle(cornerRadius: 4)
+                                    .stroke(HUDColors.green.opacity(0.35), lineWidth: 1)
+                            )
+                            .cornerRadius(4)
+                        }
                         let recs = pendingRecs
                         if recs.isEmpty {
                             VStack(alignment: .leading, spacing: 6) {

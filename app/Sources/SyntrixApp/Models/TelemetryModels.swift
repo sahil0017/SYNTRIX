@@ -41,6 +41,8 @@ struct MemoryMetrics: Codable {
     let usedPct: Double
     let pressurePct: Double
     let pressureLevel: String
+    let pageinsPerSec: Double?
+    let pageoutsPerSec: Double?
 
     enum CodingKeys: String, CodingKey {
         case totalBytes = "total_bytes"
@@ -55,6 +57,8 @@ struct MemoryMetrics: Codable {
         case usedPct = "used_pct"
         case pressurePct = "pressure_pct"
         case pressureLevel = "pressure_level"
+        case pageinsPerSec = "pageins_per_sec"
+        case pageoutsPerSec = "pageouts_per_sec"
     }
 }
 
@@ -63,12 +67,20 @@ struct DiskMetrics: Codable {
     let freeBytes: UInt64
     let availableBytes: UInt64
     let usedPct: Double
+    let readBytesPerSec: Double?
+    let writeBytesPerSec: Double?
+    let readIops: Double?
+    let writeIops: Double?
 
     enum CodingKeys: String, CodingKey {
         case totalBytes = "total_bytes"
         case freeBytes = "free_bytes"
         case availableBytes = "available_bytes"
         case usedPct = "used_pct"
+        case readBytesPerSec = "read_bytes_per_sec"
+        case writeBytesPerSec = "write_bytes_per_sec"
+        case readIops = "read_iops"
+        case writeIops = "write_iops"
     }
 }
 
@@ -121,6 +133,11 @@ struct ProcessInfoItem: Codable, Identifiable {
     let cpuPct: Double
     let memoryBytes: UInt64
     let threads: UInt32
+    let physFootprintBytes: UInt64?
+    let diskReadBps: Double?
+    let diskWriteBps: Double?
+    let pageinsPerSec: Double?
+    let wakeupsPerSec: Double?
 
     var id: Int32 { pid }
 
@@ -128,6 +145,27 @@ struct ProcessInfoItem: Codable, Identifiable {
         case pid, ppid, name, threads
         case cpuPct = "cpu_pct"
         case memoryBytes = "memory_bytes"
+        case physFootprintBytes = "phys_footprint_bytes"
+        case diskReadBps = "disk_read_bps"
+        case diskWriteBps = "disk_write_bps"
+        case pageinsPerSec = "pageins_per_sec"
+        case wakeupsPerSec = "wakeups_per_sec"
+    }
+}
+
+struct GPUMetrics: Codable {
+    let available: Bool
+    let deviceUtilPct: Double
+    let rendererUtilPct: Double
+    let tilerUtilPct: Double
+    let inUseMemoryBytes: UInt64
+
+    enum CodingKeys: String, CodingKey {
+        case available
+        case deviceUtilPct = "device_util_pct"
+        case rendererUtilPct = "renderer_util_pct"
+        case tilerUtilPct = "tiler_util_pct"
+        case inUseMemoryBytes = "in_use_memory_bytes"
     }
 }
 
@@ -139,12 +177,13 @@ struct SystemSnapshot: Codable {
     let network: NetworkMetrics
     let power: PowerMetrics
     let thermal: ThermalMetrics?
+    let gpu: GPUMetrics?
     let processCountTotal: UInt32
     let topProcesses: [ProcessInfoItem]
 
     enum CodingKeys: String, CodingKey {
         case timestampMs = "timestamp_ms"
-        case cpu, memory, disk, network, power, thermal
+        case cpu, memory, disk, network, power, thermal, gpu
         case processCountTotal = "process_count_total"
         case topProcesses = "top_processes"
     }
@@ -401,6 +440,191 @@ struct TransformerRLInfo: Codable {
     }
 }
 
+struct BottleneckClassificationInfo: Codable {
+    let dominantState: String
+    let confidence: Double
+    let culprit: String
+    let model: String
+
+    enum CodingKeys: String, CodingKey {
+        case culprit, model, confidence
+        case dominantState = "dominant_state"
+    }
+}
+
+struct PCAHealthIndexInfo: Codable {
+    let healthScore: Double
+    let primaryVarianceDriver: String
+    let pcaExplainedVariance: Double
+    let model: String
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case healthScore = "health_score"
+        case primaryVarianceDriver = "primary_variance_driver"
+        case pcaExplainedVariance = "pca_explained_variance"
+    }
+}
+
+struct StrategicDirectiveInfo: Codable {
+    let recommendedDirective: String
+    let expectedHealthGainPct: Double
+    let rationale: String
+    let policy: String
+
+    enum CodingKeys: String, CodingKey {
+        case rationale, policy
+        case recommendedDirective = "recommended_directive"
+        case expectedHealthGainPct = "expected_health_gain_pct"
+    }
+}
+
+struct ProcessHangRiskInfo: Codable, Identifiable {
+    let name: String
+    let pid: Int32
+    let hangRiskScore: Double
+    let cause: String
+    var id: Int32 { pid }
+
+    enum CodingKeys: String, CodingKey {
+        case name, pid, cause
+        case hangRiskScore = "hang_risk_score"
+    }
+}
+
+struct SuperIntelligenceInfo: Codable {
+    let bottleneck: BottleneckClassificationInfo
+    let healthIndex: PCAHealthIndexInfo
+    let strategicDirective: StrategicDirectiveInfo
+    let hangRiskScore: Double?
+    let atRiskProcesses: [ProcessHangRiskInfo]?
+    let storageUrgencyScore: Double?
+    let inferenceMs: Double?
+
+    enum CodingKeys: String, CodingKey {
+        case bottleneck
+        case healthIndex = "health_index"
+        case strategicDirective = "strategic_directive"
+        case hangRiskScore = "hang_risk_score"
+        case atRiskProcesses = "at_risk_processes"
+        case storageUrgencyScore = "storage_urgency_score"
+        case inferenceMs = "inference_ms"
+    }
+}
+
+struct ResourceNeuralInfo: Codable {
+    let tcnPredMemPct: Double
+    let gruPredMemPct: Double
+    let selectedModel: String
+    let ensemblePredMemPct: Double
+    let architecture: String
+
+    enum CodingKeys: String, CodingKey {
+        case architecture
+        case tcnPredMemPct = "tcn_pred_mem_pct"
+        case gruPredMemPct = "gru_pred_mem_pct"
+        case selectedModel = "selected_model"
+        case ensemblePredMemPct = "ensemble_pred_mem_pct"
+    }
+}
+
+struct BehaviourNeuralInfo: Codable {
+    let maxReconError: Double
+    let anomalousCount: Int
+    let topProcess: String
+    let model: String
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case maxReconError = "max_recon_error"
+        case anomalousCount = "anomalous_count"
+        case topProcess = "top_process"
+    }
+}
+
+struct ContextNeuralInfo: Codable {
+    let workingPattern: String
+    let confidence: Double
+    let sequenceStability: Double
+    let model: String
+
+    enum CodingKeys: String, CodingKey {
+        case confidence, model
+        case workingPattern = "working_pattern"
+        case sequenceStability = "sequence_stability"
+    }
+}
+
+struct CausalNeuralInfo: Codable {
+    let rootCause: String
+    let causalChain: [String]
+    let contributingFactors: [String]
+    let causalStrength: Double
+    let model: String
+
+    enum CodingKeys: String, CodingKey {
+        case model
+        case rootCause = "root_cause"
+        case causalChain = "causal_chain"
+        case contributingFactors = "contributing_factors"
+        case causalStrength = "causal_strength"
+    }
+}
+
+struct DecisionNeuralInfo: Codable {
+    let topAction: String
+    let rootCauseContext: String
+    let policy: String
+
+    enum CodingKeys: String, CodingKey {
+        case policy
+        case topAction = "top_action"
+        case rootCauseContext = "root_cause_context"
+    }
+}
+
+struct NeuralSubsystemsInfo: Codable {
+    let resourceIntelligence: ResourceNeuralInfo
+    let behaviourIntelligence: BehaviourNeuralInfo
+    let contextIntelligence: ContextNeuralInfo
+    let causalIntelligence: CausalNeuralInfo
+    let decisionIntelligence: DecisionNeuralInfo
+    let intentModel: String
+    let knowledgeModel: String
+    let latencyMs: Double
+
+    enum CodingKeys: String, CodingKey {
+        case resourceIntelligence = "resource_intelligence"
+        case behaviourIntelligence = "behaviour_intelligence"
+        case contextIntelligence = "context_intelligence"
+        case causalIntelligence = "causal_intelligence"
+        case decisionIntelligence = "decision_intelligence"
+        case intentModel = "intent_model"
+        case knowledgeModel = "knowledge_model"
+        case latencyMs = "latency_ms"
+    }
+}
+
+struct ImprovementTipInfo: Codable, Identifiable {
+    let category: String
+    let title: String
+    let action: String
+    let command: String
+    var id: String { "\(category)-\(title)" }
+}
+
+struct AppAdvisorInfo: Codable {
+    let plainEnglishSummary: String
+    let understandingNotes: [String]
+    let improvementTips: [ImprovementTipInfo]
+
+    enum CodingKeys: String, CodingKey {
+        case plainEnglishSummary = "plain_english_summary"
+        case understandingNotes = "understanding_notes"
+        case improvementTips = "improvement_tips"
+    }
+}
+
 struct PythonForecastInfo: Codable {
     let modelBackend: String
     let modelVersion: String?
@@ -411,6 +635,9 @@ struct PythonForecastInfo: Codable {
     let workloadRegime: WorkloadRegimeInfo?
     let recommendedActions: [RankedActionInfo]?
     let transformerRL: TransformerRLInfo?
+    let superIntelligence: SuperIntelligenceInfo?
+    let neuralSubsystems: NeuralSubsystemsInfo?
+    let appAdvisor: AppAdvisorInfo?
     let abnormalApps: [AbnormalAppInfo]?
     let summary: String
 
@@ -425,6 +652,9 @@ struct PythonForecastInfo: Codable {
         case workloadRegime = "workload_regime"
         case recommendedActions = "recommended_actions"
         case transformerRL = "transformer_rl"
+        case superIntelligence = "super_intelligence"
+        case neuralSubsystems = "neural_subsystems"
+        case appAdvisor = "app_advisor"
         case abnormalApps = "abnormal_apps"
     }
 }
@@ -532,6 +762,23 @@ struct StorageAuditReport: Codable {
     }
 }
 
+struct MLProgressInfo: Codable {
+    let evaluating: Bool
+    let elapsedMs: Int64
+    let estimatedMs: Int64
+    let progressPct: Double
+    let stage: String
+    let lastError: String?
+
+    enum CodingKeys: String, CodingKey {
+        case evaluating, stage
+        case elapsedMs = "elapsed_ms"
+        case estimatedMs = "estimated_ms"
+        case progressPct = "progress_pct"
+        case lastError = "last_error"
+    }
+}
+
 struct TelemetryPayload: Codable {
     let mode: OperatingMode
     let autoMode: Bool?
@@ -549,6 +796,8 @@ struct TelemetryPayload: Codable {
     let selfHealth: SelfHealthInfo?
     let guardian: GuardianStatusInfo?
     let cognitive: CognitiveStateInfo?
+    let mlProgress: MLProgressInfo?
+    let mlHealthHistory: [Double]?
 
     enum CodingKeys: String, CodingKey {
         case mode, snapshot, recommendations, governor, diagnosis, guardian, cognitive
@@ -561,6 +810,8 @@ struct TelemetryPayload: Codable {
         case workflowRuns = "workflow_runs"
         case pythonForecast = "python_forecast"
         case selfHealth = "self_health"
+        case mlProgress = "ml_progress"
+        case mlHealthHistory = "ml_health_history"
     }
 }
 

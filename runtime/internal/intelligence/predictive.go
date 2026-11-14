@@ -134,17 +134,30 @@ func (p *PredictiveEngine) Evaluate(snap engine.Snapshot) Diagnosis {
 		confidence += 0.10
 	}
 
+	if snap.Memory.PageinsPerSec >= 80 || snap.Memory.PageoutsPerSec >= 40 {
+		evidence = append(evidence, fmt.Sprintf("Active swap thrashing (%.0f pageins/s, %.0f pageouts/s)", snap.Memory.PageinsPerSec, snap.Memory.PageoutsPerSec))
+		confidence += 0.15
+	}
+	if snap.GPU.Available && snap.GPU.DeviceUtilPct >= 80 {
+		evidence = append(evidence, fmt.Sprintf("High GPU load (Device %.0f%%, Renderer %.0f%%)", snap.GPU.DeviceUtilPct, snap.GPU.RendererUtilPct))
+		confidence += 0.10
+	}
 	if topMem.Name != "" {
+		footprintMB := float64(topMem.PhysFootprintBytes) / (1024 * 1024)
+		if footprintMB == 0 {
+			footprintMB = float64(topMem.MemoryBytes) / (1024 * 1024)
+		}
+		ioMBs := (topMem.DiskReadBps + topMem.DiskWriteBps) / (1024 * 1024)
 		tree = append(tree,
 			fmt.Sprintf("Process: %s (pid=%d, start=%d)", topMem.Name, topMem.PID, topMem.StartTimeUs),
-			fmt.Sprintf("  ├─ CPU: %.1f%% | Threads: %d", topMem.CPUPct, topMem.Threads),
-			fmt.Sprintf("  └─ RSS: %.0f MB | Virtual: %.0f MB", float64(topMem.MemoryBytes)/(1024*1024), float64(topMem.VirtualBytes)/(1024*1024)),
+			fmt.Sprintf("  ├─ CPU: %.1f%% | Threads: %d | Wakeups: %.0f/s", topMem.CPUPct, topMem.Threads, topMem.WakeupsPerSec),
+			fmt.Sprintf("  └─ Footprint: %.0f MB | Disk I/O: %.1f MB/s | Pageins: %.0f/s", footprintMB, ioMBs, topMem.PageinsPerSec),
 		)
 	}
 	tree = append(tree,
-		fmt.Sprintf("System Pressure: %.0f%% [%s]", snap.Memory.PressurePct, snap.Memory.PressureLevel),
+		fmt.Sprintf("System Pressure: %.0f%% [%s] | Swap: %.0f pgIn/s, %.0f pgOut/s", snap.Memory.PressurePct, snap.Memory.PressureLevel, snap.Memory.PageinsPerSec, snap.Memory.PageoutsPerSec),
 		fmt.Sprintf("  ├─ Compressed: %.0f MB | Swap Used: %.0f MB", float64(snap.Memory.CompressedBytes)/(1024*1024), float64(snap.Memory.SwapUsedBytes)/(1024*1024)),
-		fmt.Sprintf("  └─ Thermal: %s (%.0f%% speed)", snap.Thermal.StateLabel, snap.Thermal.CPUSpeedLimitPct),
+		fmt.Sprintf("  └─ Thermal: %s (%.0f%% speed) | GPU: %.0f%%", snap.Thermal.StateLabel, snap.Thermal.CPUSpeedLimitPct, snap.GPU.DeviceUtilPct),
 	)
 
 	if confidence > 0.95 {

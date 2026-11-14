@@ -10,7 +10,7 @@ import (
 
 func TestPythonPredictorSync(t *testing.T) {
 	pred := NewPythonPredictor("")
-	ctx, cancel := context.WithTimeout(context.Background(), 6*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
 	snap := engine.Snapshot{

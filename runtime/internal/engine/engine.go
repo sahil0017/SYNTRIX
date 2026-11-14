@@ -41,13 +41,19 @@ type MemoryMetrics struct {
 	UsedPct         float64       `json:"used_pct"`
 	PressurePct     float64       `json:"pressure_pct"`
 	PressureLevel   PressureLevel `json:"pressure_level"`
+	PageinsPerSec   float64       `json:"pageins_per_sec"`
+	PageoutsPerSec  float64       `json:"pageouts_per_sec"`
 }
 
 type DiskMetrics struct {
-	TotalBytes     uint64  `json:"total_bytes"`
-	FreeBytes      uint64  `json:"free_bytes"`
-	AvailableBytes uint64  `json:"available_bytes"`
-	UsedPct        float64 `json:"used_pct"`
+	TotalBytes       uint64  `json:"total_bytes"`
+	FreeBytes        uint64  `json:"free_bytes"`
+	AvailableBytes   uint64  `json:"available_bytes"`
+	UsedPct          float64 `json:"used_pct"`
+	ReadBytesPerSec  float64 `json:"read_bytes_per_sec"`
+	WriteBytesPerSec float64 `json:"write_bytes_per_sec"`
+	ReadIOPS         float64 `json:"read_iops"`
+	WriteIOPS        float64 `json:"write_iops"`
 }
 
 type NetworkMetrics struct {
@@ -71,6 +77,14 @@ type ThermalMetrics struct {
 	StateLabel       string  `json:"state_label"`
 }
 
+type GPUMetrics struct {
+	Available         bool    `json:"available"`
+	DeviceUtilPct     float64 `json:"device_util_pct"`
+	RendererUtilPct   float64 `json:"renderer_util_pct"`
+	TilerUtilPct      float64 `json:"tiler_util_pct"`
+	InUseMemoryBytes  uint64  `json:"in_use_memory_bytes"`
+}
+
 type CollectorHealth struct {
 	ErrorCount     uint64  `json:"error_count"`
 	LastDurationUs uint64  `json:"last_duration_us"`
@@ -79,14 +93,19 @@ type CollectorHealth struct {
 }
 
 type ProcessInfo struct {
-	PID          int32   `json:"pid"`
-	PPID         int32   `json:"ppid"`
-	StartTimeUs  uint64  `json:"start_time_us"`
-	Name         string  `json:"name"`
-	CPUPct       float64 `json:"cpu_pct"`
-	MemoryBytes  uint64  `json:"memory_bytes"`
-	VirtualBytes uint64  `json:"virtual_bytes"`
-	Threads      uint32  `json:"threads"`
+	PID                int32   `json:"pid"`
+	PPID               int32   `json:"ppid"`
+	StartTimeUs        uint64  `json:"start_time_us"`
+	Name               string  `json:"name"`
+	CPUPct             float64 `json:"cpu_pct"`
+	MemoryBytes        uint64  `json:"memory_bytes"`
+	VirtualBytes       uint64  `json:"virtual_bytes"`
+	Threads            uint32  `json:"threads"`
+	PhysFootprintBytes uint64  `json:"phys_footprint_bytes"`
+	DiskReadBps        float64 `json:"disk_read_bps"`
+	DiskWriteBps       float64 `json:"disk_write_bps"`
+	PageinsPerSec      float64 `json:"pageins_per_sec"`
+	WakeupsPerSec      float64 `json:"wakeups_per_sec"`
 }
 
 type Snapshot struct {
@@ -99,6 +118,7 @@ type Snapshot struct {
 	Network           NetworkMetrics  `json:"network"`
 	Power             PowerMetrics    `json:"power"`
 	Thermal           ThermalMetrics  `json:"thermal"`
+	GPU               GPUMetrics      `json:"gpu"`
 	CPUHealth         CollectorHealth `json:"cpu_health"`
 	MemHealth         CollectorHealth `json:"mem_health"`
 	ProcHealth        CollectorHealth `json:"proc_health"`
@@ -179,14 +199,19 @@ func (c *Collector) Collect(maxProcs uint32) (Snapshot, error) {
 	for i := 0; i < topCount; i++ {
 		p := cSnap.top_processes[i]
 		procs[i] = ProcessInfo{
-			PID:          int32(p.pid),
-			PPID:         int32(p.ppid),
-			StartTimeUs:  uint64(p.start_time_us),
-			Name:         C.GoString(&p.name[0]),
-			CPUPct:       float64(p.cpu_pct),
-			MemoryBytes:  uint64(p.memory_bytes),
-			VirtualBytes: uint64(p.virtual_bytes),
-			Threads:      uint32(p.threads),
+			PID:                int32(p.pid),
+			PPID:               int32(p.ppid),
+			StartTimeUs:        uint64(p.start_time_us),
+			Name:               C.GoString(&p.name[0]),
+			CPUPct:             float64(p.cpu_pct),
+			MemoryBytes:        uint64(p.memory_bytes),
+			VirtualBytes:       uint64(p.virtual_bytes),
+			Threads:            uint32(p.threads),
+			PhysFootprintBytes: uint64(p.phys_footprint_bytes),
+			DiskReadBps:        float64(p.disk_read_bps),
+			DiskWriteBps:       float64(p.disk_write_bps),
+			PageinsPerSec:      float64(p.pageins_per_sec),
+			WakeupsPerSec:      float64(p.wakeups_per_sec),
 		}
 	}
 
@@ -224,12 +249,18 @@ func (c *Collector) Collect(maxProcs uint32) (Snapshot, error) {
 			UsedPct:         float64(cSnap.memory.used_pct),
 			PressurePct:     float64(cSnap.memory.pressure_pct),
 			PressureLevel:   pressureLevel,
+			PageinsPerSec:   float64(cSnap.memory.pageins_per_sec),
+			PageoutsPerSec:  float64(cSnap.memory.pageouts_per_sec),
 		},
 		Disk: DiskMetrics{
-			TotalBytes:     uint64(cSnap.disk.total_bytes),
-			FreeBytes:      uint64(cSnap.disk.free_bytes),
-			AvailableBytes: uint64(cSnap.disk.available_bytes),
-			UsedPct:        float64(cSnap.disk.used_pct),
+			TotalBytes:       uint64(cSnap.disk.total_bytes),
+			FreeBytes:        uint64(cSnap.disk.free_bytes),
+			AvailableBytes:   uint64(cSnap.disk.available_bytes),
+			UsedPct:          float64(cSnap.disk.used_pct),
+			ReadBytesPerSec:  float64(cSnap.disk.read_bytes_per_sec),
+			WriteBytesPerSec: float64(cSnap.disk.write_bytes_per_sec),
+			ReadIOPS:         float64(cSnap.disk.read_iops),
+			WriteIOPS:        float64(cSnap.disk.write_iops),
 		},
 		Network: NetworkMetrics{
 			TotalBytesIn:   uint64(cSnap.network.total_bytes_in),
@@ -248,6 +279,13 @@ func (c *Collector) Collect(maxProcs uint32) (Snapshot, error) {
 			CPUSpeedLimitPct: float64(cSnap.thermal.cpu_speed_limit_pct),
 			IsThrottled:      bool(cSnap.thermal.is_throttled),
 			StateLabel:       C.GoString(&cSnap.thermal.state_label[0]),
+		},
+		GPU: GPUMetrics{
+			Available:        bool(cSnap.gpu.available),
+			DeviceUtilPct:    float64(cSnap.gpu.device_util_pct),
+			RendererUtilPct:  float64(cSnap.gpu.renderer_util_pct),
+			TilerUtilPct:     float64(cSnap.gpu.tiler_util_pct),
+			InUseMemoryBytes: uint64(cSnap.gpu.in_use_memory_bytes),
 		},
 		CPUHealth:         toHealth(cSnap.cpu_health),
 		MemHealth:         toHealth(cSnap.mem_health),

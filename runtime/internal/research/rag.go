@@ -139,10 +139,34 @@ func (e *Engine) SemanticSearch(query string, topK int) []SearchHit {
 		}
 	}
 	sort.Slice(hits, func(i, j int) bool { return hits[i].Score > hits[j].Score })
-	if len(hits) > topK {
-		hits = hits[:topK]
+	// Stage-2 Reranker: Maximal Marginal Relevance (MMR) + exact-phrase boost to reduce duplicate chunks from same doc.
+	lowerQ := strings.ToLower(strings.TrimSpace(query))
+	reranked := make([]SearchHit, 0, topK)
+	docSeen := make(map[string]int, len(hits))
+	for _, h := range hits {
+		score := h.Score
+		if lowerQ != "" && strings.Contains(strings.ToLower(h.Snippet), lowerQ) {
+			score = minFloat(1.0, score+0.10)
+		}
+		if cnt := docSeen[h.DocPath]; cnt > 0 {
+			score *= 1.0 / (1.0 + 0.25*float64(cnt))
+		}
+		docSeen[h.DocPath]++
+		h.Score = score
+		reranked = append(reranked, h)
 	}
-	return hits
+	sort.Slice(reranked, func(i, j int) bool { return reranked[i].Score > reranked[j].Score })
+	if len(reranked) > topK {
+		reranked = reranked[:topK]
+	}
+	return reranked
+}
+
+func minFloat(a, b float64) float64 {
+	if a < b {
+		return a
+	}
+	return b
 }
 
 // Stats returns the number of distinct documents, vector chunks, and knowledge graph edges.

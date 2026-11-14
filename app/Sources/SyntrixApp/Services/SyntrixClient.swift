@@ -18,6 +18,7 @@ final class SyntrixClient: ObservableObject, @unchecked Sendable {
     @Published var governorStatus: GovernorStatus?
     @Published var diagnosis: DiagnosisInfo?
     @Published var pythonForecast: PythonForecastInfo?
+    @Published var mlProgress: MLProgressInfo?
     @Published var selfHealth: SelfHealthInfo?
     @Published var guardianStatus: GuardianStatusInfo?
     @Published var cognitiveState: CognitiveStateInfo?
@@ -31,13 +32,24 @@ final class SyntrixClient: ObservableObject, @unchecked Sendable {
     ]
     @Published var inputText: String = ""
     @Published var isAssistantThinking: Bool = false
+    @Published var isOptimizing: Bool = false
+    @Published var lastOptimizeSummary: String? = nil
+    @Published var isCleaningStorage: Bool = false
+    @Published var lastStorageCleanSummary: String? = nil
     @Published var activityFilter: String = "ALL"
     @Published var copiedMessageID: UUID? = nil
     @Published var cpuHistory: [Double] = []
     @Published var memPressureHistory: [Double] = []
     @Published var netInHistory: [Double] = []
     @Published var netOutHistory: [Double] = []
+    @Published var mlHealthHistory: [Double] = []
     @Published var isTelemetryPaused: Bool = false
+    @Published var telemetrySubTab: Int = 0
+    @Published var securityAuditFilter: String = "ALL"
+    @Published var securityAuditSearch: String = ""
+    @Published var securityAuditIssuesOnly: Bool = false
+    @Published var selectedAuditLogID: Int64? = nil
+    @Published var auditCopiedFeedback: Bool = false
     @Published var processSearch: String = ""
     @Published var processSortKey: String = "RSS"
     @Published var processSortAscending: Bool = false
@@ -66,6 +78,7 @@ final class SyntrixClient: ObservableObject, @unchecked Sendable {
     ]
 
     private let socketPath: String
+    var onNeedDaemon: (() -> Void)? = nil
     private let readQueue = DispatchQueue(label: "com.syntrix.ipc.read", qos: .utility)
     private let writeQueue = DispatchQueue(label: "com.syntrix.ipc.write", qos: .userInitiated)
     nonisolated(unsafe) private var fd: Int32 = -1
@@ -122,6 +135,18 @@ final class SyntrixClient: ObservableObject, @unchecked Sendable {
 
     func activateKillSwitch() {
         sendRequest(["type": "kill_switch"])
+    }
+
+    func runFullOptimize() {
+        isOptimizing = true
+        lastOptimizeSummary = nil
+        sendRequest(["type": "full_optimize"])
+    }
+
+    func cleanStorage() {
+        isCleaningStorage = true
+        lastStorageCleanSummary = nil
+        sendRequest(["type": "clean_storage"])
     }
 
     func setGuardian(enabled: Bool, idleThresholdSec: Int) {
@@ -276,6 +301,10 @@ final class SyntrixClient: ObservableObject, @unchecked Sendable {
                         self.isConnected = false
                         self.appendActivity("Disconnected from syntrixd; retrying...")
                     }
+                } else {
+                    Task { @MainActor in
+                        self.onNeedDaemon?()
+                    }
                 }
                 Thread.sleep(forTimeInterval: 2.0)
             }
@@ -365,6 +394,11 @@ final class SyntrixClient: ObservableObject, @unchecked Sendable {
                         self.appendHistory(&self.memPressureHistory, value: t.snapshot.memory.pressurePct)
                         self.appendHistory(&self.netInHistory, value: t.snapshot.network.bytesInPerSec / 1024.0)
                         self.appendHistory(&self.netOutHistory, value: t.snapshot.network.bytesOutPerSec / 1024.0)
+                        if let dbHist = t.mlHealthHistory, !dbHist.isEmpty, self.mlHealthHistory.count < 2 {
+                            self.mlHealthHistory = Array(dbHist.suffix(48))
+                        } else if let score = t.pythonForecast?.superIntelligence?.healthIndex.healthScore {
+                            self.appendHistory(&self.mlHealthHistory, value: score)
+                        }
                     }
                     let newRecs = t.recommendations ?? []
                     if self.recommendations != newRecs {
@@ -385,6 +419,7 @@ final class SyntrixClient: ObservableObject, @unchecked Sendable {
                     self.governorStatus = t.governor
                     self.diagnosis = t.diagnosis
                     self.pythonForecast = t.pythonForecast
+                    self.mlProgress = t.mlProgress
                     self.selfHealth = t.selfHealth
                     self.guardianStatus = t.guardian
                     self.cognitiveState = t.cognitive
@@ -394,6 +429,13 @@ final class SyntrixClient: ObservableObject, @unchecked Sendable {
                 }
             case "chat_reply":
                 self.isAssistantThinking = false
+                if msg.tool == "full_optimize" {
+                    self.isOptimizing = false
+                    self.lastOptimizeSummary = msg.text
+                } else if msg.tool == "clean_storage" {
+                    self.isCleaningStorage = false
+                    self.lastStorageCleanSummary = msg.text
+                }
                 if let text = msg.text {
                     let followUps = Self.suggestedFollowUps(forTool: msg.tool)
                     self.transcript.append(
@@ -437,6 +479,8 @@ final class SyntrixClient: ObservableObject, @unchecked Sendable {
                 }
             case "error":
                 self.isAssistantThinking = false
+                self.isOptimizing = false
+                self.isCleaningStorage = false
                 self.isResearchBusy = false
                 self.isWorkflowBusy = false
                 if let err = msg.error {

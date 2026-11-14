@@ -30,6 +30,18 @@ Native macOS desktop intelligence combining a **C17 system engine**, a **Go loca
 
 ---
 
+## Prerequisites
+
+- **macOS 14.0+** (Apple Silicon or Intel)
+- **Xcode Command Line Tools** (`clang`, `make`, Swift `6.0+`)
+- **Go 1.24+** (zero external Go module dependencies)
+- **Python 3.9+** with `numpy` and `scikit-learn` (for ML forecasting, neural subsystems, and Transformer RL):
+  ```sh
+  pip3 install -r requirements.txt
+  ```
+
+---
+
 ## Build, Test & Run
 
 ```sh

@@ -55,7 +55,9 @@ type TelemetryPayload struct {
 	PythonForecast  *intelligence.PythonForecast  `json:"python_forecast,omitempty"`
 	SelfHealth      *observability.HealthSnapshot `json:"self_health,omitempty"`
 	Guardian        *agent.GuardianStatus        `json:"guardian,omitempty"`
-	Cognitive       *cognitive.CognitiveState    `json:"cognitive,omitempty"`
+	Cognitive       *cognitive.CognitiveState       `json:"cognitive,omitempty"`
+	MLProgress      *intelligence.MLProgressStatus  `json:"ml_progress,omitempty"`
+	MLHealthHistory []float64                       `json:"ml_health_history,omitempty"`
 }
 
 type ResearchPayload struct {
@@ -282,7 +284,7 @@ func (s *Server) handleClient(conn net.Conn) {
 			continue
 		}
 		switch req.Type {
-		case "chat", "index_dir", "search_knowledge", "run_workflow", "run_custom_workflow":
+		case "chat", "index_dir", "search_knowledge", "run_workflow", "run_custom_workflow", "full_optimize", "clean_storage":
 			go s.dispatch(conn, req)
 		default:
 			s.dispatch(conn, req)
@@ -357,11 +359,34 @@ func (s *Server) buildPayload(snap engine.Snapshot) *TelemetryPayload {
 		}
 		if allowML {
 			payload.PythonForecast = s.pyPred.EvaluateCached(snap)
+			prog := s.pyPred.Progress()
+			payload.MLProgress = &prog
 		}
 	}
 	if s.obs != nil {
 		sh := s.obs.Snapshot()
 		payload.SelfHealth = &sh
+	}
+	if s.store != nil {
+		if rows, err := s.store.RecentSnapshots(36); err == nil && len(rows) > 0 {
+			hist := make([]float64, 0, len(rows))
+			for i := len(rows) - 1; i >= 0; i-- {
+				r := rows[i]
+				diskPen := 0.0
+				if r.DiskUsedPct > 30.0 {
+					diskPen = r.DiskUsedPct - 30.0
+				}
+				pen := 0.35*r.CPUPct + 0.45*r.MemPressurePct + 0.20*diskPen
+				sc := 100.0 - pen*0.85
+				if sc < 5.0 {
+					sc = 5.0
+				} else if sc > 99.5 {
+					sc = 99.5
+				}
+				hist = append(hist, sc)
+			}
+			payload.MLHealthHistory = hist
+		}
 	}
 	return payload
 }
@@ -438,6 +463,37 @@ func (s *Server) dispatch(conn net.Conn, req Request) {
 		msg := fmt.Sprintf("Kill switch activated: cancelled %d active optimization(s).", cancelled)
 		s.sendTo(conn, ServerMessage{Type: "chat_reply", ID: req.ID, Timestamp: now, Text: msg, Tool: "kill_switch"})
 		s.BroadcastActivity(msg)
+
+	case "full_optimize":
+		msg := s.companion.RunFullOptimize()
+		if s.storageMon != nil {
+			s.storageMon.Invalidate()
+		}
+		s.sendTo(conn, ServerMessage{Type: "chat_reply", ID: req.ID, Timestamp: now, Text: msg, Tool: "full_optimize"})
+		s.BroadcastActivity("Full Optimize: " + msg)
+		if snap, ok := s.companion.LatestSnapshot(); ok {
+			s.BroadcastTelemetry(snap)
+		}
+
+	case "clean_storage":
+		reclaimed := intelligence.CleanAllSafeTargets()
+		if s.storageMon != nil {
+			s.storageMon.Invalidate()
+		}
+		var msg string
+		if reclaimed > 0 {
+			msg = fmt.Sprintf("Storage Guard: reclaimed %.1f MB of stale caches, logs, and DerivedData.", float64(reclaimed)/(1024*1024))
+		} else {
+			msg = "Storage Guard: 0.0 MB reclaimed (remaining items may be in use, in Trash/Downloads, or protected by macOS)."
+		}
+		if s.store != nil {
+			_ = s.store.AppendAuditLog("user", "clean_storage", "Storage", "ok", msg)
+		}
+		s.sendTo(conn, ServerMessage{Type: "chat_reply", ID: req.ID, Timestamp: now, Text: msg, Tool: "clean_storage"})
+		s.BroadcastActivity(msg)
+		if snap, ok := s.companion.LatestSnapshot(); ok {
+			s.BroadcastTelemetry(snap)
+		}
 
 	case "dismiss_rec":
 		msg, err := s.companion.DismissRecommendation(req.RecID)

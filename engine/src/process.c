@@ -6,6 +6,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/proc_info.h>
+#include <sys/resource.h>
 
 #define MAX_TRACKED_PIDS 2048
 
@@ -14,6 +15,10 @@ typedef struct {
     uint64_t start_time_us;
     uint64_t total_ns;
     uint64_t mono_ns;
+    uint64_t disk_read_bytes;
+    uint64_t disk_write_bytes;
+    uint64_t pageins;
+    uint64_t idle_wakeups;
 } proc_cpu_sample_t;
 
 static proc_cpu_sample_t g_prev_procs[MAX_TRACKED_PIDS];
@@ -28,15 +33,13 @@ static uint64_t mach_ticks_to_ns(uint64_t ticks) {
     return (ticks * g_timebase.numer) / g_timebase.denom;
 }
 
-static int find_prev_proc(int32_t pid, uint64_t start_time_us, uint64_t *out_ns, uint64_t *out_mono_ns) {
+static const proc_cpu_sample_t *find_prev_proc(int32_t pid, uint64_t start_time_us) {
     for (uint32_t i = 0; i < g_prev_proc_count; i++) {
         if (g_prev_procs[i].pid == pid && g_prev_procs[i].start_time_us == start_time_us) {
-            *out_ns = g_prev_procs[i].total_ns;
-            *out_mono_ns = g_prev_procs[i].mono_ns;
-            return 1;
+            return &g_prev_procs[i];
         }
     }
-    return 0;
+    return NULL;
 }
 
 static int compare_procs(const void *a, const void *b) {
@@ -159,12 +162,35 @@ syntrix_status_t syntrix_process_collect(
         }
 
         uint64_t total_ns = mach_ticks_to_ns(task_info.pti_total_user + task_info.pti_total_system);
-        uint64_t prev_ns = 0;
-        uint64_t prev_mono = 0;
-        if (find_prev_proc(pid, info.start_time_us, &prev_ns, &prev_mono) &&
-            now_mono_ns > prev_mono && total_ns >= prev_ns) {
-            double dt_ns = (double)(now_mono_ns - prev_mono);
-            info.cpu_pct = ((double)(total_ns - prev_ns) / dt_ns) * 100.0;
+        struct rusage_info_v4 ru;
+        bool has_rusage = (proc_pid_rusage(pid, RUSAGE_INFO_V4, (rusage_info_t *)&ru) == 0);
+        if (has_rusage) {
+            info.phys_footprint_bytes = ru.ri_phys_footprint;
+        } else {
+            info.phys_footprint_bytes = info.memory_bytes;
+        }
+
+        const proc_cpu_sample_t *prev = find_prev_proc(pid, info.start_time_us);
+        if (prev && now_mono_ns > prev->mono_ns) {
+            double dt_ns = (double)(now_mono_ns - prev->mono_ns);
+            double dt_sec = dt_ns / 1000000000.0;
+            if (total_ns >= prev->total_ns) {
+                info.cpu_pct = ((double)(total_ns - prev->total_ns) / dt_ns) * 100.0;
+            }
+            if (has_rusage && dt_sec > 0.0) {
+                if (ru.ri_diskio_bytesread >= prev->disk_read_bytes) {
+                    info.disk_read_bps = (double)(ru.ri_diskio_bytesread - prev->disk_read_bytes) / dt_sec;
+                }
+                if (ru.ri_diskio_byteswritten >= prev->disk_write_bytes) {
+                    info.disk_write_bps = (double)(ru.ri_diskio_byteswritten - prev->disk_write_bytes) / dt_sec;
+                }
+                if (ru.ri_pageins >= prev->pageins) {
+                    info.pageins_per_sec = (double)(ru.ri_pageins - prev->pageins) / dt_sec;
+                }
+                if (ru.ri_pkg_idle_wkups >= prev->idle_wakeups) {
+                    info.wakeups_per_sec = (double)(ru.ri_pkg_idle_wkups - prev->idle_wakeups) / dt_sec;
+                }
+            }
         } else {
             info.cpu_pct = 0.0;
         }
@@ -174,6 +200,17 @@ syntrix_status_t syntrix_process_collect(
             next_samples[next_sample_count].start_time_us = info.start_time_us;
             next_samples[next_sample_count].total_ns = total_ns;
             next_samples[next_sample_count].mono_ns = now_mono_ns;
+            if (has_rusage) {
+                next_samples[next_sample_count].disk_read_bytes = ru.ri_diskio_bytesread;
+                next_samples[next_sample_count].disk_write_bytes = ru.ri_diskio_byteswritten;
+                next_samples[next_sample_count].pageins = ru.ri_pageins;
+                next_samples[next_sample_count].idle_wakeups = ru.ri_pkg_idle_wkups;
+            } else {
+                next_samples[next_sample_count].disk_read_bytes = 0;
+                next_samples[next_sample_count].disk_write_bytes = 0;
+                next_samples[next_sample_count].pageins = 0;
+                next_samples[next_sample_count].idle_wakeups = 0;
+            }
             next_sample_count++;
         }
 

@@ -21,17 +21,23 @@ type CacheCandidate struct {
 }
 
 type Analyzer struct {
-	mu         sync.Mutex
-	history    []engine.Snapshot
-	pidMem     map[int32][]uint64
-	pidHighCPU map[int32]int
+	mu             sync.Mutex
+	history        []engine.Snapshot
+	pidMem         map[int32][]uint64
+	pidHighCPU     map[int32]int
+	pidIOThrash    map[int32]int
+	pidWakeupDrain map[int32]int
+	ssdSatStreak   int
+	gpuSatStreak   int
 }
 
 func NewAnalyzer() *Analyzer {
 	return &Analyzer{
-		history:    make([]engine.Snapshot, 0, maxHistory),
-		pidMem:     make(map[int32][]uint64),
-		pidHighCPU: make(map[int32]int),
+		history:        make([]engine.Snapshot, 0, maxHistory),
+		pidMem:         make(map[int32][]uint64),
+		pidHighCPU:     make(map[int32]int),
+		pidIOThrash:    make(map[int32]int),
+		pidWakeupDrain: make(map[int32]int),
 	}
 }
 
@@ -60,11 +66,26 @@ func (a *Analyzer) Ingest(snap engine.Snapshot) []store.Recommendation {
 		} else {
 			a.pidHighCPU[p.PID] = 0
 		}
+
+		ioTotal := p.DiskReadBps + p.DiskWriteBps
+		if p.PageinsPerSec >= 40.0 || ioTotal >= 50*1024*1024 {
+			a.pidIOThrash[p.PID]++
+		} else {
+			a.pidIOThrash[p.PID] = 0
+		}
+
+		if p.WakeupsPerSec >= 250.0 {
+			a.pidWakeupDrain[p.PID]++
+		} else {
+			a.pidWakeupDrain[p.PID] = 0
+		}
 	}
 	for pid := range a.pidMem {
 		if !seen[pid] {
 			delete(a.pidMem, pid)
 			delete(a.pidHighCPU, pid)
+			delete(a.pidIOThrash, pid)
+			delete(a.pidWakeupDrain, pid)
 		}
 	}
 
@@ -159,6 +180,41 @@ func (a *Analyzer) detectLocked(snap engine.Snapshot) []store.Recommendation {
 				BeforeMetric: fmt.Sprintf("proc_cpu=%.1f%% threads=%d rss=%.0fMB", p.CPUPct, p.Threads, float64(p.MemoryBytes)/(1024*1024)),
 			})
 		}
+
+		if a.pidIOThrash[p.PID] >= 4 {
+			footprintMB := float64(p.PhysFootprintBytes) / (1024 * 1024)
+			if footprintMB == 0 {
+				footprintMB = float64(p.MemoryBytes) / (1024 * 1024)
+			}
+			ioMBs := (p.DiskReadBps + p.DiskWriteBps) / (1024 * 1024)
+			recs = append(recs, store.Recommendation{
+				ID:           fmt.Sprintf("proc-io-thrash-%d", p.PID),
+				CreatedAtMs:  snap.TimestampMs,
+				Kind:         "memory_pressure",
+				Severity:     "high",
+				Title:        fmt.Sprintf("Swap/I/O thrashing hang in %s (PID %d)", p.Name, p.PID),
+				Detail:       fmt.Sprintf("%s is thrashing (%.0f pageins/s, %.1f MB/s disk I/O, %.0f MB footprint) — causes UI freezes even at low CPU%%.", p.Name, p.PageinsPerSec, ioMBs, footprintMB),
+				TargetPID:    p.PID,
+				TargetName:   p.Name,
+				Status:       "pending",
+				BeforeMetric: fmt.Sprintf("pageins=%.0f/s io=%.1fMB/s footprint=%.0fMB", p.PageinsPerSec, ioMBs, footprintMB),
+			})
+		}
+
+		if snap.Power.HasBattery && !snap.Power.OnACPower && a.pidWakeupDrain[p.PID] >= 6 {
+			recs = append(recs, store.Recommendation{
+				ID:           fmt.Sprintf("proc-wakeups-%d", p.PID),
+				CreatedAtMs:  snap.TimestampMs,
+				Kind:         "cpu_spike",
+				Severity:     "medium",
+				Title:        fmt.Sprintf("Battery drain: high wakeups in %s (%.0f/s)", p.Name, p.WakeupsPerSec),
+				Detail:       fmt.Sprintf("%s (PID %d) is triggering %.0f idle wakeups/s on battery, preventing CPU sleep.", p.Name, p.PID, p.WakeupsPerSec),
+				TargetPID:    p.PID,
+				TargetName:   p.Name,
+				Status:       "pending",
+				BeforeMetric: fmt.Sprintf("wakeups=%.0f/s cpu=%.1f%%", p.WakeupsPerSec, p.CPUPct),
+			})
+		}
 	}
 
 	// 3c. Generic multi-process app-tree bloat/thrashing (e.g. browsers, Electron/IDE helpers)
@@ -205,6 +261,70 @@ func (a *Analyzer) detectLocked(snap engine.Snapshot) []store.Recommendation {
 			})
 		}
 	}
+
+		if snap.Disk.ReadBytesPerSec+snap.Disk.WriteBytesPerSec >= 250*1024*1024 ||
+			snap.Disk.ReadIOPS+snap.Disk.WriteIOPS >= 5000 {
+			a.ssdSatStreak++
+		} else {
+			a.ssdSatStreak = 0
+		}
+
+		// 4b. SSD I/O saturation detection (e.g. Spotlight mds_stores, Time Machine, heavy build)
+		if a.ssdSatStreak >= 4 {
+			topIO := "unknown"
+			var topIOPID int32
+			var maxProcIO float64
+			for _, p := range snap.TopProcesses {
+				pio := p.DiskReadBps + p.DiskWriteBps
+				if pio > maxProcIO {
+					maxProcIO = pio
+					topIO = p.Name
+					topIOPID = p.PID
+				}
+			}
+			totalMBs := (snap.Disk.ReadBytesPerSec + snap.Disk.WriteBytesPerSec) / (1024 * 1024)
+			totalIOPS := snap.Disk.ReadIOPS + snap.Disk.WriteIOPS
+			recs = append(recs, store.Recommendation{
+				ID:           "ssd-io-saturation",
+				CreatedAtMs:  snap.TimestampMs,
+				Kind:         "storage_pressure",
+				Severity:     "high",
+				Title:        fmt.Sprintf("SSD I/O saturation (%.0f MB/s, %.0f IOPS)", totalMBs, totalIOPS),
+				Detail:       fmt.Sprintf("Top disk consumer: %s (PID %d, %.1f MB/s). Heavy SSD I/O can stall UI responsiveness.", topIO, topIOPID, maxProcIO/(1024*1024)),
+				TargetPID:    topIOPID,
+				TargetName:   topIO,
+				Status:       "pending",
+				BeforeMetric: fmt.Sprintf("ssd_mbs=%.0f iops=%.0f top=%s", totalMBs, totalIOPS, topIO),
+			})
+		}
+
+		if snap.GPU.Available && (snap.GPU.DeviceUtilPct >= 85.0 || snap.GPU.RendererUtilPct >= 85.0) {
+			a.gpuSatStreak++
+		} else {
+			a.gpuSatStreak = 0
+		}
+
+		// 4c. GPU-bound hang / saturation detection (e.g. Chrome GPU Helper, WebGL, video calls, ML)
+		if a.gpuSatStreak >= 4 {
+			topName := "GPU workload"
+			var topPID int32
+			if len(snap.TopProcesses) > 0 {
+				topName = snap.TopProcesses[0].Name
+				topPID = snap.TopProcesses[0].PID
+			}
+			recs = append(recs, store.Recommendation{
+				ID:           "gpu-saturation",
+				CreatedAtMs:  snap.TimestampMs,
+				Kind:         "cpu_spike",
+				Severity:     "medium",
+				Title:        fmt.Sprintf("GPU saturation (Device %.0f%%, Renderer %.0f%%)", snap.GPU.DeviceUtilPct, snap.GPU.RendererUtilPct),
+				Detail:       fmt.Sprintf("Apple GPU/Accelerator is heavily loaded (Tiler %.0f%%, %.0f MB GPU mem). Top active process: %s (PID %d).", snap.GPU.TilerUtilPct, float64(snap.GPU.InUseMemoryBytes)/(1024*1024), topName, topPID),
+				TargetPID:    topPID,
+				TargetName:   topName,
+				Status:       "pending",
+				BeforeMetric: fmt.Sprintf("gpu_dev=%.0f%% gpu_ren=%.0f%%", snap.GPU.DeviceUtilPct, snap.GPU.RendererUtilPct),
+			})
+		}
 
 	// 4. 50% storage ceiling warning
 	if snap.Disk.UsedPct > DefaultStorageLimitPct {

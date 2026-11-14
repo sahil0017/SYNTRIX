@@ -73,6 +73,73 @@ class TestPredictiveModel(unittest.TestCase):
             self.assertGreaterEqual(len(out["recommended_actions"]), 1)
             self.assertGreaterEqual(len(out["abnormal_apps"]), 1)
             self.assertEqual(out["abnormal_apps"][0]["name"], "RunawayCompiler")
+            self.assertIn("cause", out["abnormal_apps"][0])
+            self.assertGreater(out["inference_ms"], 0.0)
+            self.assertIn("super_intelligence", out)
+            si = out["super_intelligence"]
+            self.assertIn("hang_risk_score", si)
+            self.assertIn("storage_urgency_score", si)
+            self.assertIn("at_risk_processes", si)
+            self.assertGreaterEqual(si["hang_risk_score"], 50.0)
+            self.assertIn("app_advisor", out)
+            self.assertTrue(len(out["app_advisor"]["plain_english_summary"]) > 0)
+            self.assertGreaterEqual(len(out["app_advisor"]["improvement_tips"]), 1)
+
+    def test_super_intelligence_nan_and_swap_thrash_resilience(self):
+        from super_intelligence import run_super_intelligence
+
+        res = run_super_intelligence(
+            [],
+            {
+                "cpu_pct": float("nan"),
+                "mem_pressure_pct": 88.0,
+                "disk_used_pct": 62.0,
+                "pageins_per_sec": 320.0,
+                "pageouts_per_sec": 95.0,
+                "top_processes": [
+                    {
+                        "name": "Google Chrome Helper",
+                        "pid": 4242,
+                        "cpu_pct": 14.0,
+                        "memory_bytes": 3_100_000_000,
+                        "pageins": 420.0,
+                        "wakeups_per_sec": 45.0,
+                    }
+                ],
+            },
+        )
+        self.assertEqual(res["bottleneck"]["dominant_state"], "Swap-Thrash Freeze")
+        self.assertEqual(res["strategic_directive"]["recommended_directive"], "/optimize-memory")
+        self.assertGreater(res["hang_risk_score"], 70.0)
+        self.assertEqual(res["at_risk_processes"][0]["cause"], "swap_thrash")
+
+    def test_all_seven_neural_subsystems_and_intent(self):
+        from neural_subsystems import classify_user_intent, run_neural_subsystems
+
+        ns = run_neural_subsystems(
+            [],
+            {
+                "cpu_pct": 82.0,
+                "mem_pressure_pct": 79.0,
+                "disk_used_pct": 62.0,
+                "pageins_per_sec": 180.0,
+                "gpu_util_pct": 25.0,
+                "mode": "ASSIST",
+                "top_processes": [
+                    {"name": "Chrome", "pid": 500, "cpu_pct": 76.0, "memory_bytes": 2_200_000_000, "pageins": 140}
+                ],
+            },
+        )
+        self.assertIn("resource_intelligence", ns)
+        self.assertIn(ns["resource_intelligence"]["selected_model"], ("TCN", "GRU"))
+        self.assertEqual(ns["behaviour_intelligence"]["model"], "LSTM-Autoencoder-v2")
+        self.assertEqual(ns["context_intelligence"]["model"], "ContextEmbed-Seq-v1")
+        self.assertEqual(ns["causal_intelligence"]["model"], "CausalDAG-v1")
+        self.assertEqual(ns["decision_intelligence"]["policy"], "Constrained-LinUCB-v1")
+
+        intent = classify_user_intent("my chrome browser is lagging and eating ram")
+        self.assertIn(intent["intent"], ("diagnose_hang", "optimize_memory"))
+        self.assertGreater(intent["confidence"], 0.1)
 
 
 if __name__ == "__main__":

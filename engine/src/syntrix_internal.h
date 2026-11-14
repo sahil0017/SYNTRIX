@@ -26,6 +26,7 @@ syntrix_status_t syntrix_network_collect(syntrix_network_metrics_t *out);
 
 syntrix_status_t syntrix_power_collect(syntrix_power_metrics_t *out);
 syntrix_status_t syntrix_thermal_collect(syntrix_thermal_metrics_t *out);
+syntrix_status_t syntrix_gpu_collect(syntrix_gpu_metrics_t *out);
 
 int64_t syntrix_now_ms(void);
 uint64_t syntrix_monotonic_ns(void);

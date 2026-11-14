@@ -48,6 +48,7 @@ type Companion struct {
 	orchestrator     *Orchestrator
 	supervisor       *Supervisor
 	guardian         *GuardianAgent
+	pyPred           *intelligence.PythonPredictor
 	lastSnap         *engine.Snapshot
 	activeApp        string
 	activeBundleID   string
@@ -85,6 +86,12 @@ func (c *Companion) GetSupervisor() *Supervisor {
 func (c *Companion) SetGuardian(g *GuardianAgent) {
 	c.mu.Lock()
 	c.guardian = g
+	c.mu.Unlock()
+}
+
+func (c *Companion) SetPythonPredictor(p *intelligence.PythonPredictor) {
+	c.mu.Lock()
+	c.pyPred = p
 	c.mu.Unlock()
 }
 
@@ -231,6 +238,16 @@ func (c *Companion) LatestSnapshot() (engine.Snapshot, bool) {
 	return *c.lastSnap, true
 }
 
+func (c *Companion) RunFullOptimize() string {
+	c.mu.RLock()
+	orch := c.orchestrator
+	c.mu.RUnlock()
+	if orch == nil {
+		return "Orchestrator unavailable."
+	}
+	return orch.RunFullOptimize()
+}
+
 func (c *Companion) HandlePrompt(prompt string) (string, string) {
 	trimmed := strings.TrimSpace(prompt)
 	if trimmed == "" {
@@ -333,6 +350,9 @@ func (c *Companion) HandlePrompt(prompt string) (string, string) {
 		}
 		return "Supervisor unavailable.", "tool:learning.path"
 
+	case lower == "/optimize-all" || strings.Contains(lower, "optimize all") || strings.Contains(lower, "optimize everything") || strings.Contains(lower, "optimize my mac"):
+		return c.RunFullOptimize(), "full_optimize"
+
 	case lower == "/optimize-memory" || (strings.Contains(lower, "memory") && (strings.Contains(lower, "optimi") || strings.Contains(lower, "analy"))) || (strings.Contains(lower, "ram") && (strings.Contains(lower, "optimi") || strings.Contains(lower, "analy"))):
 		c.mu.RLock()
 		orch := c.orchestrator
@@ -377,6 +397,7 @@ func (c *Companion) reasonAndRespond(prompt string) (string, string) {
 	c.mu.RLock()
 	sup := c.supervisor
 	guard := c.guardian
+	pyPred := c.pyPred
 	c.mu.RUnlock()
 
 	// 1. Software dev or knowledge work intent -> use local Supervisor Dev & RAG engines
@@ -414,12 +435,29 @@ func (c *Companion) reasonAndRespond(prompt string) (string, string) {
 		p := snap.TopProcesses[0]
 		topProc = fmt.Sprintf("%s (PID %d, %.1f%% CPU, %.0f MB)", p.Name, p.PID, p.CPUPct, float64(p.MemoryBytes)/(1024*1024))
 	}
+	mlLine := ""
+	if pyPred != nil {
+		if fc := pyPred.EvaluateCached(snap); fc != nil && fc.SuperIntelligence != nil {
+			si := fc.SuperIntelligence
+			mlLine = fmt.Sprintf(
+				"\n• ML Super-Intelligence: Health %.0f/100 · Bottleneck: %s (%.0f%% conf, culprit: %s) · Hang Risk: %.0f%% · Directive: %s (%s)",
+				si.HealthIndex.HealthScore,
+				si.Bottleneck.DominantState,
+				si.Bottleneck.Confidence*100.0,
+				si.Bottleneck.Culprit,
+				si.HangRiskScore,
+				si.StrategicDirective.RecommendedDirective,
+				si.StrategicDirective.Rationale,
+			)
+		}
+	}
 	return fmt.Sprintf(
-		"SYNTRIX Reasoning [%s | Guardian:%s | Active:%s]:\n• Diagnosis: %s (confidence %.0f%%)\n• Live Load: CPU %.1f%% · Mem Pressure %.0f%% · Disk %.1f%%/50%%\n• Heaviest Process: %s\n• Next: Ask me to optimize memory, clean unused storage, or run /antigravity for dev & knowledge tasks.",
+		"SYNTRIX Reasoning [%s | Guardian:%s | Active:%s]:\n• Diagnosis: %s (confidence %.0f%%)\n• Live Load: CPU %.1f%% · Mem Pressure %.0f%% · Disk %.1f%%/50%%\n• Heaviest Process: %s%s\n• Next: Ask me to optimize memory, clean unused storage, or run /antigravity for dev & knowledge tasks.",
 		c.Mode(), guardState, fallbackStr(activeApp, "Desktop"),
 		diag.Summary, diag.Confidence*100.0,
 		snap.CPU.TotalUsagePct, snap.Memory.PressurePct, snap.Disk.UsedPct,
 		fallbackStr(topProc, "None"),
+		mlLine,
 	), "chat:reasoned"
 }
 
