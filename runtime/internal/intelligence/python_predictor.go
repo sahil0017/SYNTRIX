@@ -230,6 +230,9 @@ func resolvePythonBin() string {
 	if env := os.Getenv("SYNTRIX_PYTHON"); env != "" {
 		return env
 	}
+	if pathPython, err := exec.LookPath("python3"); err == nil {
+		return pathPython
+	}
 	for _, candidate := range []string{"/opt/homebrew/bin/python3", "/usr/local/bin/python3", "python3"} {
 		if _, err := os.Stat(candidate); err == nil {
 			return candidate
