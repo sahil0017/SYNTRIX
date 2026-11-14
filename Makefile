@@ -1,4 +1,4 @@
-.PHONY: all engine runtime app bundle open test bench run clean
+.PHONY: all engine runtime app bundle release open test bench run clean
 
 all: engine runtime app
 
@@ -29,6 +29,9 @@ bundle: all
 	codesign --force --sign - /tmp/SYNTRIX.app
 	ditto /tmp/SYNTRIX.app build/SYNTRIX.app
 	rm -rf /tmp/SYNTRIX.app
+
+release: bundle
+	./scripts/package_release.sh
 
 open: bundle
 	open build/SYNTRIX.app

@@ -6,6 +6,19 @@ Native macOS desktop intelligence combining a **C17 system engine**, a **Go loca
 
 ---
 
+## Download
+
+- **macOS App Installer (DMG):** [Download SYNTRIX-macOS.dmg](https://github.com/sahil0017/SYNTRIX/releases/latest/download/SYNTRIX-macOS.dmg)
+- **macOS App Archive (ZIP):** [Download SYNTRIX-macOS.zip](https://github.com/sahil0017/SYNTRIX/releases/latest/download/SYNTRIX-macOS.zip)
+- **All Releases & Checksums:** [GitHub Releases](https://github.com/sahil0017/SYNTRIX/releases)
+
+> If macOS Gatekeeper warns on first launch for an ad-hoc signed build, right-click `SYNTRIX.app` → **Open**, or run:
+> ```sh
+> xattr -cr /Applications/SYNTRIX.app
+> ```
+
+---
+
 ## Core Capabilities
 
 - **C17 Native System Engine (`engine/`):**
