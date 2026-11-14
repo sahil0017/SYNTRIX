@@ -1,0 +1,24 @@
+# Build outputs & binaries
+build/
+engine/build/
+runtime/build/
+app/.build/
+*.o
+*.a
+*.dylib
+*.app
+
+# Python
+__pycache__/
+*.pyc
+.venv/
+
+# macOS & IDE
+.DS_Store
+.vscode/
+
+# Local runtime state
+*.db
+*.db-wal
+*.db-shm
+*.sock
